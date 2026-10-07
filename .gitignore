@@ -1,0 +1,10 @@
+.venv/
+.tools/
+.python/
+.uv-cache/
+.ultralytics/
+__pycache__/
+*.py[cod]
+models/*.pt
+models/*.task
+/sessions/

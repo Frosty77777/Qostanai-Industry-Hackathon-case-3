@@ -1,0 +1,11 @@
+# Python 3.11/3.12. Install the CPU PyTorch wheels first (see README.md).
+torch==2.8.0
+torchvision==0.23.0
+ultralytics==8.3.221
+opencv-python==4.12.0.88
+numpy==2.2.6
+# MediaPipe Tasks supports NumPy 2; match both packages' shared cv2 binaries.
+mediapipe==0.10.32
+opencv-contrib-python==4.12.0.88
+# Desktop shell; the OpenCV-only CLI remains available.
+PySide6==6.11.2
