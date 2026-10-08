@@ -12,6 +12,7 @@ from exams import ExamAttempt
 from monitoring import EventType
 from security.secure_window import SecureWindowGuard
 from session_storage.session_repository import LocalSessionRepository, SessionSummary
+from i18n import language_manager
 
 from .assistant_model import AssistantPreferencesStore
 from .exam_page import ExamPage
@@ -72,6 +73,9 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.assistant_preferences = (assistant_preferences if assistant_preferences is not None
                                       else AssistantPreferencesStore())
+        language_manager.set_language(self.assistant_preferences.preferences.language)
+        unsubscribe_language = self.assistant_preferences.subscribe(self._language_preferences_changed)
+        self.destroyed.connect(lambda: unsubscribe_language())
         self.setup_page = SetupPage(assistant_preferences=self.assistant_preferences,
                                     assistant_clock=clock)
         self.setup_page.set_secure_mode(self.config.secure_mode)
@@ -100,6 +104,9 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._tick)
+        self._focus_retry_timer = QTimer(self)
+        self._focus_retry_timer.setSingleShot(True)
+        self._focus_retry_timer.timeout.connect(self._retry_focus)
         self._q_shortcut = QShortcut(QKeySequence("Q"), self)
         self._q_shortcut.setEnabled(False)
         self._q_shortcut.activated.connect(self.finish_session)
@@ -116,6 +123,9 @@ class MainWindow(QMainWindow):
         QApplication.instance().applicationStateChanged.connect(self._application_state_changed)
         if auto_discover:
             QTimer.singleShot(0, self.discover)
+
+    def _language_preferences_changed(self, preferences):
+        language_manager.set_language(preferences.language)
 
     def discover(self):
         if self._closing or self.worker is not None or self.discovery is not None:
@@ -321,12 +331,48 @@ class MainWindow(QMainWindow):
     def _recover_focus(self):
         if self.state != "EXAM" or not self._secure_mode_active or self._closing:
             return False
-        attempted = self.secure_guard.recover(self)
+        if self._exam_has_focus():
+            self.secure_guard.observe_focus(True)
+            self._focus_retry_timer.stop()
+            return False
+        handle = self._session_config.window_handle if self._session_config else None
+        attempted = self.secure_guard.begin_recovery(self, window_handle=handle)
+        self._schedule_focus_retry()
+        self._report_focus_error()
+        return attempted
+
+    def _exam_has_focus(self):
+        # A false native packet may also mean native monitoring is unavailable.
+        # Reset a retry budget only on a real Qt activation/confirmed foreground.
+        if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive:
+            return False
+        modal = QApplication.activeModalWidget()
+        return bool(self.isActiveWindow() or (modal is not None and self.isAncestorOf(modal) and modal.isActiveWindow()))
+
+    def _schedule_focus_retry(self):
+        if self.secure_guard.recovery_pending and not self._focus_retry_timer.isActive():
+            self._focus_retry_timer.start(ceil(self.config.secure_window.focus_recovery_retry_interval_seconds * 1000))
+        elif not self.secure_guard.recovery_pending:
+            self._focus_retry_timer.stop()
+
+    def _retry_focus(self):
+        if self.state != "EXAM" or not self._secure_mode_active or self._closing:
+            self._focus_retry_timer.stop()
+            return
+        if self._exam_has_focus():
+            self.secure_guard.observe_focus(True)
+            self._focus_retry_timer.stop()
+            return
+        handle = self._session_config.window_handle if self._session_config else None
+        self.secure_guard.retry_recovery(self, window_handle=handle)
+        self._schedule_focus_retry()
+        self._report_focus_error()
+
+    def _report_focus_error(self):
         error = self.secure_guard.last_error
         if error and error != self._focus_warning:
             self._focus_warning = error
             print(f"[SECURITY] Exam focus recovery failed: {error}", file=sys.stderr)
-        return attempted
 
     def _queue_application_security(self, kind, source):
         if self.state == "EXAM" and self.worker is not None:
@@ -335,6 +381,9 @@ class MainWindow(QMainWindow):
                 receiver(kind, source, False)
 
     def _application_state_changed(self, application_state):
+        if application_state == Qt.ApplicationState.ApplicationActive and self._exam_has_focus():
+            self.secure_guard.observe_focus(True)
+            self._focus_retry_timer.stop()
         if (application_state == Qt.ApplicationState.ApplicationInactive
                 and self.state == "EXAM" and self._secure_mode_active and not self._closing):
             # Record deactivation first. Recovery may succeed before the native
@@ -350,6 +399,7 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _restore_window_mode(self):
+        self._focus_retry_timer.stop()
         if self._secure_mode_active:
             self._secure_mode_active = False
             self.secure_guard.release()
@@ -373,6 +423,8 @@ class MainWindow(QMainWindow):
         self._finalize_exam("interrupted")
         self.state = "STOPPING"
         self._timer.stop()
+        self._focus_retry_timer.stop()
+        self.secure_guard.release()
         self._q_shortcut.setEnabled(False)
         self.exam_page.set_stopping()
         self.setup_page.set_busy(True, "Stopping monitoring and releasing resources…")
@@ -415,7 +467,10 @@ class MainWindow(QMainWindow):
         else:
             self.state = "SETUP"
             self.pages.setCurrentWidget(self.setup_page)
-            self.setup_page.message.setText(self._startup_error or "Session did not start. You can recheck and try again.")
+            if self._startup_error:
+                self.setup_page.message.setMessage("Session could not start: {error}", error=self._startup_error)
+            else:
+                self.setup_page.message.setText("Session did not start. You can recheck and try again.")
         self._finish_close_if_ready()
 
     def new_session(self):
@@ -581,6 +636,8 @@ class MainWindow(QMainWindow):
             self.setup_page.set_busy(True, "Closing after background resources are released…")
         else:
             self._timer.stop()
+            self._focus_retry_timer.stop()
+            self.secure_guard.release()
             self.exam_page.banner_timer.stop()
             self.setup_page.assistant.set_stopping()
             self.exam_page.assistant.set_stopping()
@@ -594,6 +651,8 @@ class MainWindow(QMainWindow):
         """Last-resort orderly cleanup if QApplication is quit externally."""
         self.setup_page.assistant.set_stopping()
         self.exam_page.assistant.set_stopping()
+        self._focus_retry_timer.stop()
+        self.secure_guard.release()
         if self.worker is not None:
             self._finalize_exam("interrupted")
             self.exam_page.question_panel.set_active(False)

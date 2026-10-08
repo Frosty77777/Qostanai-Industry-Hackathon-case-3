@@ -5,13 +5,15 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView,
-    QProgressBar, QPushButton, QScrollArea, QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
+    QProgressBar, QScrollArea, QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
 )
+from i18n import language_manager, tr
 from monitoring import EventType
+from .localized_widgets import QPushButton
 from .evidence_viewer import EvidenceGallery
 from .completion_page import CompletionPage
 from .session import DISPLAY_TIMEZONE, format_duration
-from .theme import RISK_COLORS, SEVERITY_COLORS, card, label
+from .theme import MUTED, RISK_COLORS, SEVERITY_COLORS, card, label, progress_style, text_style
 
 EVENT_LABELS = {
     EventType.PHONE_DETECTED: "Phone detected",
@@ -52,6 +54,13 @@ class EventTimelineModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.events = ()
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
+
+    def _language_changed(self, _language):
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self.HEADERS) - 1)
+        if self.events:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.events) - 1, len(self.HEADERS) - 1))
 
     def set_events(self, events):
         self.beginResetModel()
@@ -66,7 +75,7 @@ class EventTimelineModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
+            return tr(self.HEADERS[section])
         return super().headerData(section, orientation, role)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -74,15 +83,16 @@ class EventTimelineModel(QAbstractTableModel):
             return None
         event = self.events[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
-            values = (display_time(event.timestamp), EVENT_LABELS.get(event.type, str(event.type)),
-                      event.severity.value.upper(), f"{event.risk_delta or 0:+d}", event.message)
+            values = (display_time(event.timestamp), tr(EVENT_LABELS.get(event.type, str(event.type))),
+                      tr(event.severity.value.upper()), f"{event.risk_delta or 0:+d}", tr(event.message))
             return values[index.column()]
         if role == Qt.ItemDataRole.ForegroundRole and index.column() == 2:
-            return QColor(SEVERITY_COLORS.get(event.severity.value, "#91a3bb"))
+            return QColor(SEVERITY_COLORS.get(event.severity.value, MUTED))
         if role == Qt.ItemDataRole.ToolTipRole:
-            return (f"{event.type.value} · {display_time(event.timestamp)} (UTC+5)\n"
-                    f"{event.severity.value.upper()} · {event.risk_delta or 0:+d} risk\n"
-                    f"{event.message}\n{event.evidence_path or 'No webcam evidence'}")
+            return tr("{event} · {timestamp} (UTC+5)\n{severity} · {delta} risk\n{message}\n{path}",
+                      event=event.type.value, timestamp=display_time(event.timestamp),
+                      severity=event.severity.value.upper(), delta=f"{event.risk_delta or 0:+d}",
+                      message=tr(event.message), path=event.evidence_path or tr("No webcam evidence"))
         if role == Qt.ItemDataRole.TextAlignmentRole and index.column() in (2, 3):
             return Qt.AlignmentFlag.AlignCenter
         return None
@@ -95,6 +105,13 @@ class ExamAnswersModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rows = ()
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
+
+    def _language_changed(self, _language):
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self.HEADERS) - 1)
+        if self.rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, len(self.HEADERS) - 1))
 
     def set_result(self, result):
         self.beginResetModel()
@@ -113,7 +130,7 @@ class ExamAnswersModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
+            return tr(self.HEADERS[section])
         return super().headerData(section, orientation, role)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -122,7 +139,7 @@ class ExamAnswersModel(QAbstractTableModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             value = self.rows[index.row()][index.column()]
             if index.column() in (2, 3):
-                return str(value).replace("_", " ").title()
+                return tr(str(value).replace("_", " ").title())
             if value is None or value == "" or value == () or value == []:
                 return "—"
             if isinstance(value, (list, tuple)):
@@ -138,6 +155,8 @@ class ReportPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._result = None
+        self._academic_result = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.presentation = QStackedWidget()
@@ -197,7 +216,7 @@ class ReportPage(QWidget):
             for name in names:
                 value = label("—")
                 value.setWordWrap(True)
-                details.addRow(name, value)
+                details.addRow(label(name), value)
                 self.exam_values[name] = value
             exam_overview.addLayout(details, 3)
         exam_layout.addLayout(exam_overview)
@@ -213,7 +232,7 @@ class ReportPage(QWidget):
         for name in ("Student", "Exam", "Start time", "End time", "Duration"):
             value = label("—")
             value.setWordWrap(True)
-            form.addRow(name, value)
+            form.addRow(label(name), value)
             self.values[name] = value
         metadata_layout.addLayout(form)
         overview.addWidget(metadata, 3)
@@ -242,7 +261,7 @@ class ReportPage(QWidget):
             column.addWidget(label(text, role="heading"))
             value = label("0", size=28)
             if key != "total":
-                value.setStyleSheet(f"font-size: 28px; font-weight: 600; color: {SEVERITY_COLORS[key]};")
+                value.setStyleSheet(text_style(SEVERITY_COLORS[key], font_size=28, bold=True))
             self.severity_values[key] = value
             column.addWidget(value)
             totals.addLayout(column, 1)
@@ -317,8 +336,18 @@ class ReportPage(QWidget):
         self.answers_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         answers_layout.addWidget(self.answers_table, 1)
         self.tabs.addTab(answers_page, "Answers")
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
+        self._language_changed(language_manager.language)
+
+    def _language_changed(self, _language):
+        for index, source in enumerate(("Summary", "Full timeline", "Evidence", "Answers")):
+            self.tabs.setTabText(index, tr(source))
+        self._refresh_exam_text()
+        self._refresh_session_text()
 
     def _set_exam_result(self, result):
+        self._academic_result = result
         self.answers_model.set_result(result)
         for value in self.exam_values.values():
             value.setText("—")
@@ -344,32 +373,39 @@ class ReportPage(QWidget):
             "Interrupted · provisional" if interrupted else
             "Time limit reached" if result.submission_reason == "expired" else "Submitted"
         )
-        note = f"{result.exam_name} · Only choice questions contribute to the academic score."
+        self._refresh_exam_text()
+
+    def _refresh_exam_text(self):
+        result = self._academic_result
+        if result is None:
+            return
+        interrupted = result.submission_reason == "interrupted"
+        note = tr("{exam} · Only choice questions contribute to the academic score.", exam=result.exam_name)
         if result.text_pending_count:
-            note += " Written answers await manual review."
+            note += tr(" Written answers await manual review.")
         if interrupted:
-            note += " The session ended before normal submission; these answers are provisional."
-        self.exam_note.setText(note)
-        self.answers_note.setText(
-            f"{result.exam_name} · {len(result.question_ids)} questions · "
-            "Written answers are stored for instructor review."
-        )
+            note += tr(" The session ended before normal submission; these answers are provisional.")
+        self.exam_note.setRawText(note)
+        self.answers_note.setMessage(
+            "{exam} · {count} questions · Written answers are stored for instructor review.",
+            exam=result.exam_name, count=len(result.question_ids))
 
     def set_result(self, result):
+        self._result = result
         self._set_exam_result(getattr(result, "exam_result", None))
-        self.values["Student"].setText(result.student)
-        self.values["Exam"].setText(result.exam)
+        self.values["Student"].setRawText(result.student)
+        self.values["Exam"].setRawText(result.exam)
         self.values["Start time"].setText(display_time(result.started_at))
         self.values["End time"].setText(display_time(result.ended_at))
         self.values["Duration"].setText(format_duration(result.duration_seconds))
-        color = RISK_COLORS.get(result.risk_level, "#91a3bb")
+        color = RISK_COLORS.get(result.risk_level, MUTED)
         self.risk_score.setText(f"{result.risk_score} / 100")
-        self.risk_score.setStyleSheet(f"font-size: 44px; font-weight: 700; color: {color};")
+        self.risk_score.setStyleSheet(text_style(color, font_size=44, bold=True))
         self.risk_level.setText(result.risk_level)
-        self.risk_level.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {color};")
+        self.risk_level.setStyleSheet(text_style(color, font_size=22, bold=True))
         self.risk_bar.setValue(result.risk_score)
-        self.risk_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; }}")
-        self.values["Final Risk"].setText(f"{result.risk_score} / 100 · {result.risk_level}")
+        self.risk_bar.setStyleSheet(progress_style(color))
+        self.values["Final Risk"].setMessage("{score} / 100 · {level}", score=result.risk_score, level=result.risk_level)
         counts = Counter(event.type for event in result.events)
         severities = Counter(event.severity.value for event in result.events)
         self.values["Total Events"].setText(str(len(result.events)))
@@ -381,17 +417,23 @@ class ReportPage(QWidget):
         self.timeline_model.set_events(result.events)
         self.timeline_count.setText(f"{len(result.events)} events · chronological order · UTC+5")
         self.evidence.set_result(result)
-        messages = []
-        if result.error:
-            messages.append(f"Session ended with a component error: {result.error}")
-        if result.persistence_error:
-            messages.append(f"Local save failed: {result.persistence_error}. The in-memory report remains available.")
-        elif result.session_directory:
-            messages.append(f"Saved locally: {result.session_directory}")
-        messages.append("Review suspicious events and supporting images before drawing conclusions.")
-        self.message.setText("\n".join(messages))
+        self._refresh_session_text()
         self.tabs.setCurrentIndex(0)
         self.presentation.setCurrentWidget(self.detail_widget)
+
+    def _refresh_session_text(self):
+        result = self._result
+        if result is None:
+            return
+        messages = []
+        if result.error:
+            messages.append(tr("Session ended with a component error: {error}", error=result.error))
+        if result.persistence_error:
+            messages.append(tr("Local save failed: {error}. The in-memory report remains available.", error=result.persistence_error))
+        elif result.session_directory:
+            messages.append(tr("Saved locally: {path}", path=result.session_directory))
+        messages.append(tr("Review suspicious events and supporting images before drawing conclusions."))
+        self.message.setRawText("\n".join(messages))
 
     def show_completion(self, result):
         # Keep the trusted report model available for legacy/controller APIs,
@@ -422,6 +464,7 @@ class ReportPage(QWidget):
         self.back_to_sessions_requested.emit()
 
     def reset(self):
+        self._result = None
         self.completion_page.reset()
         self.set_teacher_review(False)
         self.presentation.setCurrentWidget(self.detail_widget)
@@ -433,10 +476,11 @@ class ReportPage(QWidget):
         for value in self.summary_values.values():
             value.setText("0")
         self.risk_score.setText("0 / 100")
-        self.risk_score.setStyleSheet("font-size: 44px; font-weight: 700; color: #43c6a4;")
+        self.risk_score.setStyleSheet(text_style(RISK_COLORS["LOW"], font_size=44, bold=True))
         self.risk_level.setText("LOW")
-        self.risk_level.setStyleSheet("font-size: 22px; font-weight: 600; color: #43c6a4;")
+        self.risk_level.setStyleSheet(text_style(RISK_COLORS["LOW"], font_size=22, bold=True))
         self.risk_bar.setValue(0)
+        self.risk_bar.setStyleSheet(progress_style(RISK_COLORS["LOW"]))
         self.timeline_model.set_events(())
         self.timeline_count.setText("0 events · chronological order · UTC+5")
         self.evidence.clear()

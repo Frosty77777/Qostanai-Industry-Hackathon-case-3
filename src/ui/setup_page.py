@@ -1,12 +1,14 @@
 """Setup fields and asynchronous preflight status."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
+from i18n import LANGUAGE_NAMES, language_manager, tr
+from .localized_widgets import QComboBox, QLineEdit, QPushButton
 
 from exams import ExamDefinition, ExamValidationError, load_demo_exam, load_exam
 
 from .assistant_widget import AssistantDock
-from .theme import apply_status, card, label
+from .theme import COLORS, COMPACT_INPUT_STYLE, apply_status, card, label, text_style
 
 
 class SetupPage(QWidget):
@@ -30,7 +32,17 @@ class SetupPage(QWidget):
         panel.setMaximumWidth(700)
         layout.setContentsMargins(32, 26, 32, 26)
         layout.setSpacing(14)
-        layout.addWidget(label("AI Exam Guard", role="title"))
+        title = QHBoxLayout()
+        title.addWidget(label("AI Exam Guard", role="title"), 1)
+        title.addWidget(label("Language"))
+        self.language_select = QComboBox()
+        self.language_select.setAccessibleName("Language")
+        self.language_select.setStyleSheet(COMPACT_INPUT_STYLE)
+        self.language_select.setMaximumWidth(140)
+        for code, name in LANGUAGE_NAMES.items():
+            self.language_select.addRawItem(name, code)
+        title.addWidget(self.language_select)
+        layout.addLayout(title)
         layout.addWidget(label("Local AI-Assisted Proctoring", role="muted"))
         form = QFormLayout()
         form.setSpacing(12)
@@ -42,8 +54,8 @@ class SetupPage(QWidget):
         self.exam_input.setMaxLength(100)
         self.camera_select = QComboBox()
         self.camera_select.addItem("Checking available cameras…", None)
-        form.addRow("Student Name", self.student_input)
-        form.addRow("Exam Name", self.exam_input)
+        form.addRow(label("Student Name"), self.student_input)
+        form.addRow(label("Exam Name"), self.exam_input)
         exam_row = QHBoxLayout()
         self.exam_select = QComboBox()
         self.exam_select.currentIndexChanged.connect(self._exam_selected)
@@ -51,13 +63,13 @@ class SetupPage(QWidget):
         self.load_exam_button = QPushButton("LOAD EXAM JSON")
         self.load_exam_button.clicked.connect(self._choose_exam_file)
         exam_row.addWidget(self.load_exam_button)
-        form.addRow("Exam", exam_row)
+        form.addRow(label("Exam"), exam_row)
         self.secure_mode_select = QComboBox()
         self.secure_mode_select.addItem("Maximized (recommended)", "MAXIMIZED")
         self.secure_mode_select.addItem("Fullscreen", "FULLSCREEN")
         self.secure_mode_select.addItem("Windowed", "WINDOWED")
-        form.addRow("Exam window", self.secure_mode_select)
-        form.addRow("Camera", self.camera_select)
+        form.addRow(label("Exam window"), self.secure_mode_select)
+        form.addRow(label("Camera"), self.camera_select)
         layout.addLayout(form)
         layout.addWidget(label("SYSTEM STATUS", role="heading"))
         self.status_labels = {}
@@ -79,7 +91,7 @@ class SetupPage(QWidget):
         layout.addWidget(self.message)
         self.exam_error = label("", role="muted")
         self.exam_error.setWordWrap(True)
-        self.exam_error.setStyleSheet("color: #ff955f;")
+        self.exam_error.setStyleSheet(text_style(COLORS.warning))
         self.exam_error.hide()
         layout.addWidget(self.exam_error)
         buttons = QHBoxLayout()
@@ -100,6 +112,9 @@ class SetupPage(QWidget):
         if assistant_clock is not None:
             assistant_options["clock"] = assistant_clock
         self.assistant = AssistantDock(**assistant_options)
+        self.language_select.setCurrentIndex(self.language_select.findData(self.assistant.preferences.preferences.language))
+        language_manager.set_language(self.assistant.preferences.preferences.language)
+        self.language_select.currentIndexChanged.connect(self._language_selected)
         self.assistant.setFixedWidth(300)
         # A separate lane keeps the greeting away from setup inputs/statuses.
         content = QWidget()
@@ -113,7 +128,7 @@ class SetupPage(QWidget):
         outer.addStretch()
         try:
             demo = load_demo_exam()
-            self.exam_select.addItem(demo.title, demo)
+            self.exam_select.addRawItem(demo.title, demo)
         except ExamValidationError as exc:
             self.exam_error.setText(f"Demo exam unavailable: {exc}. Load a valid local exam JSON.")
             self.exam_error.show()
@@ -121,6 +136,12 @@ class SetupPage(QWidget):
     @property
     def selected_exam(self):
         return self._selected_exam
+
+    def _language_selected(self, index):
+        code = self.language_select.itemData(index)
+        if code in LANGUAGE_NAMES:
+            self.assistant.preferences.update(language=code)
+            language_manager.set_language(code)
 
     @property
     def selected_secure_mode(self):
@@ -156,13 +177,13 @@ class SetupPage(QWidget):
                 self.exam_select.setCurrentIndex(index)
                 self._selected_exam = exam
                 return
-        self.exam_select.addItem(exam.title, exam)
+        self.exam_select.addRawItem(exam.title, exam)
         self.exam_select.setCurrentIndex(self.exam_select.count() - 1)
 
     def _choose_exam_file(self):
         if self._busy:
             return
-        path, _filter = QFileDialog.getOpenFileName(self, "Load local exam", "", "Exam JSON (*.json)")
+        path, _filter = QFileDialog.getOpenFileName(self, tr("Load local exam"), "", tr("Exam JSON (*.json)"))
         if path:
             self.load_exam_file(path)
 
@@ -179,12 +200,12 @@ class SetupPage(QWidget):
             previous = self.exam_select.itemData(index)
             if previous is not None and previous.reference == exam.reference:
                 self.exam_select.setItemData(index, exam)
-                self.exam_select.setItemText(index, exam.title)
+                self.exam_select.setRawItemText(index, exam.title)
                 self.exam_select.setCurrentIndex(index)
                 self._selected_exam = exam
                 break
         else:
-            self.exam_select.addItem(exam.title, exam)
+            self.exam_select.addRawItem(exam.title, exam)
             self.exam_select.setCurrentIndex(self.exam_select.count() - 1)
         self.exam_error.clear()
         self.exam_error.hide()

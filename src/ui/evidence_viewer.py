@@ -5,12 +5,14 @@ from pathlib import Path, PureWindowsPath
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QIcon, QImageReader, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QDialog, QGridLayout, QHBoxLayout, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
 )
+from i18n import language_manager, tr
+from .localized_widgets import QLabel, QPushButton
 
 from .session import ROOT
-from .theme import SEVERITY_COLORS, card, label
+from .theme import MUTED, SEVERITY_COLORS, card, label, text_style
 
 PAGE_SIZE = 8
 THUMBNAIL_SIZE = QSize(360, 180)
@@ -93,7 +95,10 @@ def frame_source_note(event):
 class EvidenceDialog(QDialog):
     def __init__(self, path, event, title, timestamp, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Evidence · {title}")
+        self._title = title
+        self._translate_title(language_manager.language)
+        unsubscribe = language_manager.subscribe(self._translate_title)
+        self.destroyed.connect(lambda *_args: unsubscribe())
         self.resize(1020, 720)
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -124,6 +129,9 @@ class EvidenceDialog(QDialog):
         close = QPushButton("CLOSE")
         close.clicked.connect(self.accept)
         root.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+    def _translate_title(self, _language):
+        self.setWindowTitle(tr("Evidence · {event}", event=self._title))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -221,7 +229,7 @@ class EvidenceGallery(QWidget):
             layout.addWidget(heading)
             layout.addWidget(label(self._time(event.timestamp) + " · UTC+5", role="muted"))
             facts = label(f"{event.severity.value.upper()} · {event.risk_delta or 0:+d} risk")
-            facts.setStyleSheet(f"color: {SEVERITY_COLORS.get(event.severity.value, '#91a3bb')}; font-weight: 600;")
+            facts.setStyleSheet(text_style(SEVERITY_COLORS.get(event.severity.value, MUTED), bold=True))
             layout.addWidget(facts)
             source = frame_source_note(event)
             if source:

@@ -27,6 +27,8 @@ and evidence locally. The original OpenCV-only CLI remains available.
   draggable safe-area placement, and saved visibility/message preferences.
 - Separate local JSON/evidence folders; New Session preserves previous completed sessions.
 - Camera/model preflight, clear module statuses, background CV, and cooperative cleanup.
+- English, Russian, and Kazakh presentation with a persisted Setup language selector.
+- A centralized light academic theme with readable status and warning colors.
 
 ## Architecture
 
@@ -194,7 +196,7 @@ During a secure student session, ordinary close requests are ignored and Escape
 cannot exit the exam. Use SUBMIT EXAM for a confirmed submission, or have an
 instructor authorize **EXIT SECURE MODE** before using normal exit controls.
 
-The question-first dark layout targets **1280x800, 1366x768, and 1920x1080**.
+The question-first light layout targets **1280x800, 1366x768, and 1920x1080**.
 Warnings overlay the bottom of the right-column webcam, leaving most video
 visible; long question/report content scrolls.
 
@@ -328,6 +330,34 @@ separate. Written answers are stored verbatim and excluded from the automatic
 score denominator and percentage. All-text exams display pending manual review
 instead of a misleading zero percent. Academic scores never alter proctoring risk.
 
+## Language and visual preferences
+
+Setup's **Language** selector offers **English / Русский / Қазақша** (`en`, `ru`,
+`kk`). Switching updates the existing pages, statuses, warnings, assistant,
+navigation, break authorization, completion, instructor reports, and evidence
+viewer without restarting the application. The choice is saved with the existing
+assistant preferences at **`%LOCALAPPDATA%/AIExamGuard/assistant.json`**; the
+existing home-directory fallback applies when LOCALAPPDATA is unavailable.
+Older files default to English. A settings-write failure retains the chosen
+language for the current application and logs the error.
+
+`src/i18n/translations.py` provides the central language service and formatting
+rules, with common/student/report catalog fragments. Every key has EN/RU/KK
+text and matching placeholders. `ui/localized_widgets.py` retains canonical
+presentation sources and updates them through weak language observers. Language
+changes do not replay monitoring events, advance assistant deadlines, reset
+answers, or decode evidence again. Event enums, stored records, risk logic,
+student names, loaded exam content/answers, file paths, and technical exception
+details remain unchanged; localized guidance surrounds technical diagnostics.
+
+`ui/theme.py` centralizes the near-white background, white/light-gray cards, dark
+text, blue controls, green readiness, amber warnings, red critical states, and
+reusable panel/navigation/assistant styles. The camera keeps a dark neutral
+frame to preserve image readability. Inference model, resolution, thresholds,
+CPU settings, and QThread behavior are unchanged by this polish pass. The user's
+reported live **approximately 12 FPS** is accepted; offscreen UI checks do not
+measure live webcam performance.
+
 ## Secure exam window
 
 The official desktop launcher defaults to **MAXIMIZED** and requires maximized
@@ -341,14 +371,31 @@ stable throughout the exam. Trusted development launchers can explicitly use
 `SecureWindowConfig(required=False)` with WINDOWED mode.
 
 Focus loss is recorded before attempting recovery. Qt application-state changes
-and the existing native foreground check share security cooldowns. While focus
-remains lost, `SecureWindowGuard` retries restore/raise/activation at a configurable
-interval, default **1 second**, without generating an event on every retry.
-Windows can deny foreground activation; this is best-effort recovery, not OS
-lockdown. See [Qt's activateWindow limitations](https://doc.qt.io/qt-6/qwidget.html#activateWindow).
+and the existing native foreground check share security cooldowns. Each loss
+episode starts one bounded burst: **four attempts**, including the immediate
+attempt, spaced **0.2 seconds** apart by a single-shot UI timer. Each attempt
+shows the window, restores configured maximized/fullscreen mode, raises it, and
+requests Qt activation. If Qt is insufficient, the isolated
+`security/windows_focus.py` helper validates that the protected HWND belongs to
+this process, then uses `ShowWindow`, `BringWindowToTop`, and
+`SetForegroundWindow`. It verifies the actual foreground window.
+
+Confirmed focus stops pending retries; exhausted attempts stay exhausted until
+focus is regained. Repeated lost-focus frames do not renew the attempt budget or
+postpone the timer. Instructor-authorized exit, submission, and shutdown cancel
+recovery immediately. Recovery does not suppress security history, risk, or the
+existing event cooldowns, and failures do not crash monitoring.
+
+Windows foreground restrictions can still refuse activation, including while
+another application owns input or a secure desktop is active. This is best-effort
+recovery, not OS lockdown. There is no fake input, thread-input attachment,
+process termination, registry/policy change, or secure-desktop interference. See
+[Windows foreground activation restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
+and [Qt's activateWindow limitations](https://doc.qt.io/qt-6/qwidget.html#activateWindow).
 
 `SecureWindowConfig` centralizes required mode, focus recovery, retry interval,
-and optional `suppressed_shortcuts`. The default set is empty. Trusted local
+attempt limit, native recovery enablement, and optional `suppressed_shortcuts`.
+The default suppression set is empty. Trusted local
 configuration can select existing supported COPY_ATTEMPT, PASTE_ATTEMPT,
 PRINTSCREEN_ATTEMPT, and bare ESCAPE_ATTEMPT suppression, for example:
 
@@ -358,7 +405,9 @@ from security.secure_window import SecureWindowConfig
 
 secure_window = SecureWindowConfig(
     required=True,
-    focus_recovery_cooldown_seconds=1.0,
+    focus_recovery_retry_interval_seconds=0.2,
+    focus_recovery_max_attempts=4,
+    native_focus_recovery_enabled=True,
     suppressed_shortcuts=frozenset({EventType.PASTE_ATTEMPT}),
 )
 ```
@@ -709,9 +758,12 @@ grading, immutable submission/checkpoints, fake-time expiry, confirmation,
 separate academic/risk results, paste policy/cooldowns/shutdown flushing, secure
 PIN exit, full JSON results, and actual QThread submission/save/cleanup.
 
-All **795 tests pass** on Python **3.12.0**, preserving the prior **679 tests** and
-adding **116** assistant regressions: 64 model/preferences, 36 widget, and 16
-page/controller tests. Assistant coverage includes all risk boundaries, timed
+All **932 tests pass** on Python **3.12.0**, preserving all **795** prior tests
+and adding **137** final-polish regressions: 30 focus component/native, 17 focus
+controller, 34 localization/lifecycle, 17 localized assistant, 17 localized report,
+and 22 student preferences/theme checks. The prior assistant integration includes
+116 regressions: 64 model/preferences, 36 widget, and 16 page/controller tests.
+Assistant coverage includes all risk boundaries, timed
 event overrides/debounce, late timers, authorized-break tone, hiding/messages,
 safe dragging and interrupted mouse capture, preference reload/failure,
 page transitions, secure HWND preservation, private completion/review, and cleanup.
@@ -727,6 +779,35 @@ existing viewer on a synthetic saved image without modifying session files.
 Assistant renders also cover Setup, Exam, critical messages, inline options, and
 technical/obstruction warnings at these sizes. The legacy 1366x728 timeline and
 break-warning regressions remain passing. No real camera/hooks run in these checks.
+
+The final polish pass adds focus component/controller checks, EN/RU/KK catalog
+and widget checks, assistant/report localization regressions, persisted-language
+tests, raw-content/privacy checks, and light-theme contrast checks. There are
+**456 complete translation keys**. Synthetic final UI QA covers all three
+languages at the three sizes above, including persistent absence/obstruction,
+tracker unavailability, PIN authorization, breaks, assistant options, teacher
+pages, reports, and evidence. The longer Russian absence warning wraps inside
+the camera panel. Real foreground recovery, physical camera behavior, Windows
+DPI scaling, and native-language proofreading still need manual verification.
+Language observers use weak references and constant-time token removal. This
+avoids quadratic widget teardown during large page/test cleanup; the existing
+QThread watchdog tests remain unchanged and pass. New UI fixtures explicitly
+drain Qt deferred deletions. The final complete run took 51.4 seconds.
+
+Files in the final polish pass:
+
+- Created: `src/security/windows_focus.py`; `src/i18n/__init__.py`,
+  `translations.py`, `common_translations.py`, `student_translations.py`,
+  `report_translations.py`; `src/ui/localized_widgets.py`.
+- Changed: `src/security/secure_window.py`; `src/ui/theme.py`,
+  `assistant_model.py`, `assistant_widget.py`, `setup_page.py`, `exam_page.py`,
+  `question_panel.py`, `main_window.py`, `completion_page.py`,
+  `teacher_review_page.py`, `report_page.py`, `evidence_viewer.py`; this README.
+- Added tests: `tests/test_focus_recovery.py`, `test_focus_controller.py`,
+  `test_localization.py`, `test_localized_assistant.py`,
+  `test_localized_reports.py`, `test_product_polish.py`.
+- Generated QA scripts/screenshots live under ignored `sessions/current/`.
+  No dependency or `.gitignore` change was needed.
 
 The following checks predate this hardening pass. A real webcam smoke opened
 camera 0 for 20 frames at 640x480 and initialized CPU

@@ -3,12 +3,14 @@
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
-                               QLineEdit, QPushButton, QStackedWidget,
+                               QStackedWidget,
                                QTableView, QVBoxLayout, QWidget)
 
+from i18n import language_manager, tr
+from .localized_widgets import QLineEdit, QPushButton
 from .report_page import display_time
 from .session import format_duration
-from .theme import RISK_COLORS, card, label
+from .theme import MUTED, RISK_COLORS, COLORS, card, label, text_style
 
 
 class CompletedSessionsModel(QAbstractTableModel):
@@ -17,6 +19,13 @@ class CompletedSessionsModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.summaries = ()
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
+
+    def _language_changed(self, _language):
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, len(self.HEADERS) - 1)
+        if self.summaries:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.summaries) - 1, len(self.HEADERS) - 1))
 
     def set_sessions(self, summaries):
         self.beginResetModel()
@@ -31,25 +40,25 @@ class CompletedSessionsModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
-            return self.HEADERS[section]
+            return tr(self.HEADERS[section])
         return super().headerData(section, orientation, role)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or not 0 <= index.row() < len(self.summaries):
             return None
         summary = self.summaries[index.row()]
-        score = ("Manual review" if summary.exam_max_score == 0
+        score = (tr("Manual review") if summary.exam_max_score == 0
                  else f"{summary.exam_score} / {summary.exam_max_score}"
                  if summary.exam_score is not None and summary.exam_max_score is not None else "—")
         values = (summary.student, summary.exam, display_time(summary.started_at),
                   format_duration(summary.duration_seconds), score,
-                  f"{summary.risk_score} / 100", summary.risk_level)
+                  f"{summary.risk_score} / 100", tr(summary.risk_level))
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return values[index.column()]
         if role == Qt.ItemDataRole.UserRole:
             return summary.session_id
         if role == Qt.ItemDataRole.ForegroundRole and index.column() == 6:
-            return QColor(RISK_COLORS.get(summary.risk_level, "#91a3bb"))
+            return QColor(RISK_COLORS.get(summary.risk_level, MUTED))
         return None
 
 
@@ -62,6 +71,7 @@ class TeacherReviewPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._diagnostics = None
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
         self.stack = QStackedWidget()
@@ -84,7 +94,7 @@ class TeacherReviewPage(QWidget):
         content.addWidget(self.pin_input)
         self.pin_error = label("", role="muted")
         self.pin_error.setWordWrap(True)
-        self.pin_error.setStyleSheet("color: #ff955f;")
+        self.pin_error.setStyleSheet(text_style(COLORS.critical))
         self.pin_error.hide()
         content.addWidget(self.pin_error)
         pin_buttons = QHBoxLayout()
@@ -133,7 +143,7 @@ class TeacherReviewPage(QWidget):
         sessions.addWidget(self.table, 1)
         self.list_error = label("", role="muted")
         self.list_error.setWordWrap(True)
-        self.list_error.setStyleSheet("color: #ff955f;")
+        self.list_error.setStyleSheet(text_style(COLORS.warning))
         self.list_error.hide()
         sessions.addWidget(self.list_error)
         actions = QHBoxLayout()
@@ -148,6 +158,21 @@ class TeacherReviewPage(QWidget):
         sessions.addLayout(actions)
         self.stack.addWidget(self.sessions_page)
         self.show_locked()
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
+
+    def _language_changed(self, _language):
+        self._refresh_diagnostics()
+
+    def _refresh_diagnostics(self):
+        if self._diagnostics is None:
+            return
+        displayed = [tr("Session review notice: {detail}", detail=tr(str(error)[:250]))
+                     for error in self._diagnostics[:3]]
+        if len(self._diagnostics) > 3:
+            displayed.append(tr("{count} additional session(s) could not be listed.", count=len(self._diagnostics) - 3))
+        self.list_error.setRawText("\n".join(displayed))
+        self.list_error.setVisible(bool(self._diagnostics))
 
     def _submit_pin(self):
         pin = self.pin_input.text()
@@ -163,6 +188,7 @@ class TeacherReviewPage(QWidget):
             self.session_open_requested.emit(self.sessions_model.summaries[row].session_id)
 
     def show_locked(self):
+        self._diagnostics = None
         self.sessions_model.set_sessions(())
         self.table.clearSelection()
         self.open_button.setEnabled(False)
@@ -181,16 +207,13 @@ class TeacherReviewPage(QWidget):
         self.pin_error.hide()
         self.sessions_model.set_sessions(summaries)
         self.message.setText(f"{len(self.sessions_model.summaries)} completed session(s) · Select a session to review its full report")
-        errors = tuple(errors)
-        displayed = [str(error)[:250] for error in errors[:3]]
-        if len(errors) > 3:
-            displayed.append(f"{len(errors) - 3} additional session(s) could not be listed.")
-        self.list_error.setText("\n".join(displayed))
-        self.list_error.setVisible(bool(errors))
+        self._diagnostics = tuple(errors)
+        self._refresh_diagnostics()
         self.stack.setCurrentWidget(self.sessions_page)
         self.open_button.setEnabled(False)
 
     def set_error(self, message):
+        self._diagnostics = None
         target = self.pin_error if self.stack.currentWidget() is self.locked_page else self.list_error
         target.setText(str(message))
         target.setVisible(bool(message))

@@ -1,7 +1,10 @@
 """Student-facing completion screen. No proctoring details are rendered here."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
+
+from i18n import language_manager, tr
+from .localized_widgets import QPushButton
 
 from .session import DISPLAY_TIMEZONE, format_duration
 from .theme import card, label
@@ -13,6 +16,7 @@ class CompletionPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._result = None
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 28, 32, 28)
         root.addStretch()
@@ -33,7 +37,7 @@ class CompletionPage(QWidget):
             value = label("—")
             value.setWordWrap(True)
             self.values[name] = value
-            form.addRow(name, value)
+            form.addRow(label(name), value)
         layout.addLayout(form)
         self.notice = label("", role="muted")
         self.notice.setWordWrap(True)
@@ -50,23 +54,34 @@ class CompletionPage(QWidget):
         layout.addLayout(buttons)
         root.addWidget(panel, 0, Qt.AlignmentFlag.AlignHCenter)
         root.addStretch()
+        unsubscribe = language_manager.subscribe(self._language_changed)
+        self.destroyed.connect(lambda *_args: unsubscribe())
 
     def set_result(self, result):
+        self._result = result
+        self._refresh_result()
+
+    def _language_changed(self, _language):
+        if self._result is not None:
+            self._refresh_result()
+
+    def _refresh_result(self):
+        result = self._result
         academic = getattr(result, "exam_result", None)
         interrupted = academic is not None and academic.submission_reason == "interrupted"
         self.heading.setText("SESSION ENDED" if interrupted else "EXAM SUBMITTED")
         saved = bool(result.session_directory) and not result.persistence_error
-        self.message.setText(
-            ("Your answers have been saved." if saved else "The exam session has ended.")
-            + "\nThe proctoring report is available for instructor review."
-        )
-        self.values["Student"].setText(result.student)
-        self.values["Exam"].setText(result.exam)
+        self.message.setRawText("\n".join((
+            tr("Your answers have been saved." if saved else "The exam session has ended."),
+            tr("The proctoring report is available for instructor review."),
+        )))
+        self.values["Student"].setRawText(result.student)
+        self.values["Exam"].setRawText(result.exam)
         submitted = academic.submitted_at if academic is not None else result.ended_at
         if submitted is not None and submitted.tzinfo is not None:
             submitted = submitted.astimezone(DISPLAY_TIMEZONE)
-        self.values["Submitted"].setText(submitted.strftime("%Y-%m-%d %H:%M:%S") if submitted else "—")
-        self.values["Duration"].setText(format_duration(result.duration_seconds))
+        self.values["Submitted"].setRawText(submitted.strftime("%Y-%m-%d %H:%M:%S") if submitted else "—")
+        self.values["Duration"].setRawText(format_duration(result.duration_seconds))
         notes = []
         if result.persistence_error:
             notes.append("The local save could not complete. Please contact your instructor before starting another session.")
@@ -74,10 +89,11 @@ class CompletionPage(QWidget):
             notes.append("Please check with your instructor that your submission has been retained.")
         if interrupted:
             notes.append("This session ended before normal submission. Please contact your instructor about the current answers.")
-        self.notice.setText("\n".join(notes))
+        self.notice.setRawText("\n".join(tr(note) for note in notes))
         self.notice.setVisible(bool(notes))
 
     def reset(self):
+        self._result = None
         self.heading.setText("EXAM SUBMITTED")
         self.message.setText("Your answers have been saved.\nThe proctoring report is available for instructor review.")
         for value in self.values.values():

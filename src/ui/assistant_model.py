@@ -307,8 +307,11 @@ class AssistantPreferences:
     visible: bool = True
     message_visible: bool = True
     positions: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    language: str = "en"
 
     def __post_init__(self) -> None:
+        if self.language not in {"en", "ru", "kk"}:
+            raise ValueError("Assistant language preference must be en, ru, or kk")
         if type(self.visible) is not bool or type(self.message_visible) is not bool:
             raise ValueError("Assistant visibility preferences must be booleans")
         if not isinstance(self.positions, Mapping):
@@ -404,7 +407,10 @@ class AssistantPreferencesStore:
                                 positions[context] = _normalized_position(position)
                             except ValueError:
                                 pass
-                preferences = AssistantPreferences(visible, message_visible, positions)
+                chosen_language = raw.get("language", "en")
+                if chosen_language not in ("en", "ru", "kk"):
+                    chosen_language = "en"
+                preferences = AssistantPreferences(visible, message_visible, positions, chosen_language)
         except (OSError, ValueError, TypeError, UnicodeError) as exc:
             self._failure("load", exc)
         self._publish(preferences)
@@ -424,6 +430,9 @@ class AssistantPreferencesStore:
                    "message_visible": preferences.message_visible,
                    "positions": {context: list(position)
                                  for context, position in preferences.positions.items()}}
+            # Omitting the English default preserves existing preference files.
+            if preferences.language != "en":
+                raw["language"] = preferences.language
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
                                              prefix=f".{self.path.stem}.", suffix=".tmp",
@@ -446,12 +455,15 @@ class AssistantPreferencesStore:
                     pass
 
     def update(self, *, visible: bool | None = None, message_visible: bool | None = None,
-               context: str | None = None, position: tuple[float, float] | None = None) -> bool:
+               context: str | None = None, position: tuple[float, float] | None = None,
+               language: str | None = None) -> bool:
         changes = {}
         if visible is not None:
             changes["visible"] = visible
         if message_visible is not None:
             changes["message_visible"] = message_visible
+        if language is not None:
+            changes["language"] = language
         if context is not None or position is not None:
             if context not in CONTEXTS or position is None:
                 raise ValueError("Supply both a valid assistant context and position")

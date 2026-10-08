@@ -2,14 +2,16 @@
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QListWidget, QListWidgetItem, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
+from i18n import language_manager, tr
 from monitoring import EventType
 from monitoring.break_manager import BreakConfig
 from vision.face_tracker import FaceStatus
 from .assistant_widget import AssistantDock
 from .session import format_duration
-from .theme import RISK_COLORS, SEVERITY_COLORS, apply_status, card, label
+from .localized_widgets import QComboBox, QLabel, QLineEdit, QPushButton
+from .theme import COLORS, VIDEO_STYLE, RISK_COLORS, SEVERITY_COLORS, apply_status, card, label, panel_style, progress_style, text_style
 from .question_panel import QuestionPanel
 
 TIMELINE_LIMIT = 80
@@ -21,7 +23,7 @@ class VideoPreview(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(460, 280)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet("background: #080d14; border: 1px solid #2a3749; border-radius: 10px;")
+        self.setStyleSheet(VIDEO_STYLE)
         self._source = None
 
     def set_image(self, image):
@@ -32,6 +34,13 @@ class VideoPreview(QLabel):
         if self._source is not None:
             self.setPixmap(self._source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
                                               Qt.TransformationMode.SmoothTransformation))
+
+    def _retranslate(self, language=None):
+        super()._retranslate(language)
+        # QLabel.setText clears its pixmap. Keep the current detached camera
+        # image visible when labels switch language; no worker/frame replay.
+        if getattr(self, "_source", None) is not None:
+            self._redraw()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -76,7 +85,7 @@ class ExamPage(QWidget):
         header.addLayout(clock)
         header.addSpacing(24)
         self.secure_session_indicator = label("WINDOWED SESSION", role="heading")
-        self.secure_session_indicator.setStyleSheet("background: #283142; color: #a5b6cd; padding: 7px; border-radius: 6px;")
+        self.secure_session_indicator.setStyleSheet(panel_style("neutral"))
         header.addWidget(self.secure_session_indicator)
         self.authorize_break_button = QPushButton("AUTHORIZE BREAK")
         self.authorize_break_button.clicked.connect(self._open_authorization)
@@ -121,12 +130,12 @@ class ExamPage(QWidget):
         self.banner.setMinimumHeight(44)
         self.banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.banner.setWordWrap(True)
-        self.banner.setStyleSheet("background: #1d3348; border-radius: 7px; color: #a7cff5; font-weight: 600;")
+        self.banner.setStyleSheet(panel_style("info"))
         video_column.addWidget(self.banner)
         self.face_tracking_notice = label("")
         self.face_tracking_notice.setWordWrap(True)
         self.face_tracking_notice.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.face_tracking_notice.setStyleSheet("background: #283142; color: #ffd17c; padding: 8px; border-radius: 7px;")
+        self.face_tracking_notice.setStyleSheet(panel_style("warning", padding=8))
         self.face_tracking_notice.hide()
         video_column.addWidget(self.face_tracking_notice)
         self.video = VideoPreview()
@@ -145,18 +154,21 @@ class ExamPage(QWidget):
         warnings.setContentsMargins(12, 12, 12, 12)
         warnings.setSpacing(8)
         self.face_warning = label("WARNING\nSTUDENT LEFT CAMERA VIEW")
+        self.face_warning.setWordWrap(True)
         self.face_warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.face_warning.setStyleSheet("background: #862b3d; border-radius: 8px; color: white; padding: 14px; font-size: 20px; font-weight: 700;")
+        self.face_warning.setStyleSheet(panel_style("critical", padding=14, font_size=20, strong=True))
         self.face_warning.hide()
         warnings.addWidget(self.face_warning)
         self.obstruction_warning = label("WARNING\nCAMERA VIEW OBSTRUCTED")
+        self.obstruction_warning.setWordWrap(True)
         self.obstruction_warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.obstruction_warning.setStyleSheet(self.face_warning.styleSheet())
         self.obstruction_warning.hide()
         warnings.addWidget(self.obstruction_warning)
         self.break_banner = label("AUTHORIZED BREAK\n00:00 remaining")
+        self.break_banner.setWordWrap(True)
         self.break_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.break_banner.setStyleSheet("background: #164e46; border-radius: 8px; color: white; padding: 12px; font-size: 20px; font-weight: 700;")
+        self.break_banner.setStyleSheet(panel_style("success", padding=12, font_size=20))
         self.break_banner.hide()
         warnings.addWidget(self.break_banner)
         overlay.addWidget(warning_container, 0, 0, Qt.AlignmentFlag.AlignBottom)
@@ -202,7 +214,8 @@ class ExamPage(QWidget):
         self._component_states = {}
         for index, name in enumerate(("Camera", "AI Detection", "Face Tracking", "Security Monitor", "Evidence", "Session")):
             title = {"AI Detection": "YOLO", "Security Monitor": "SECURITY"}.get(name, name.upper())
-            status = label(f"{title}: CHECKING")
+            status = label("")
+            status.setMessage("{component}: {state}", component=title, state="CHECKING")
             status.setToolTip("Component initialization pending")
             self.runtime_statuses[name] = (title, status)
             status_grid.addWidget(status, index // 3, index % 3)
@@ -265,6 +278,8 @@ class ExamPage(QWidget):
         self.banner_timer.setSingleShot(True)
         self.banner_timer.timeout.connect(self._clear_banner)
         self.banner_seconds = 3.0
+        unsubscribe = language_manager.subscribe(self._retranslate_timeline)
+        self.destroyed.connect(lambda: unsubscribe())
 
     def set_exam_attempt(self, attempt, security_config=None):
         """Attach local controls without moving any CV work onto the UI thread."""
@@ -282,11 +297,11 @@ class ExamPage(QWidget):
         self.monitoring_column.setMaximumWidth(590)
         self.video.setMinimumSize(320, 240)
         self.banner.setMinimumHeight(28)
-        self.banner.setStyleSheet("background: #1d3348; border-radius: 7px; color: #a7cff5; font-weight: 600; font-size: 12px;")
+        self.banner.setStyleSheet(panel_style("info", font_size=12))
         self.fps_label.setWordWrap(True)
-        self.fps_label.setStyleSheet("color: #91a3bb; font-size: 11px;")
+        self.fps_label.setStyleSheet(text_style(COLORS.muted, font_size=11))
         self.question_panel.question_text.setStyleSheet("font-size: 24px; font-weight: 600;")
-        self.face_tracking_notice.setStyleSheet("background: #283142; color: #ffd17c; padding: 6px; border-radius: 7px; font-size: 12px;")
+        self.face_tracking_notice.setStyleSheet(panel_style("warning", padding=6, font_size=12))
         if not self._compact_monitoring:
             self._compact_monitoring = True
             # The exam owns the main area; diagnostics remain in the camera column.
@@ -309,7 +324,7 @@ class ExamPage(QWidget):
                 self._monitor_grid.addWidget(self.values[name], row, column * 2 + 1)
                 self._monitor_names[name].show()
                 self.values[name].show()
-                self._monitor_names[name].setStyleSheet("color: #91a3bb; font-size: 12px;")
+                self._monitor_names[name].setStyleSheet(text_style(COLORS.muted, font_size=12))
                 self.values[name].setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 self.values[name].setStyleSheet("font-size: 12px;")
             self._monitor_names["AI Detection"].hide()
@@ -319,7 +334,7 @@ class ExamPage(QWidget):
             self._risk_row.insertWidget(0, label("RISK", role="heading"))
             self.timeline.setMinimumHeight(48)
             self.timeline.setMaximumHeight(72)
-            self.event_count.setStyleSheet("color: #91a3bb; font-size: 11px;")
+            self.event_count.setStyleSheet(text_style(COLORS.muted, font_size=11))
             self.timeline_toggle = QPushButton("HIDE EVENT TIMELINE")
             self.timeline_toggle.setCheckable(True)
             self.timeline_toggle.setChecked(True)
@@ -336,7 +351,7 @@ class ExamPage(QWidget):
             while self._status_grid.count():
                 self._status_grid.takeAt(0)
             for index, (_title, status) in enumerate(self.runtime_statuses.values()):
-                status.setStyleSheet("color: #91a3bb; font-size: 10px;")
+                status.setStyleSheet(text_style(COLORS.muted, font_size=10))
                 status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 status.setWordWrap(True)
                 self._status_grid.addWidget(status, index // 2, index % 2)
@@ -358,12 +373,11 @@ class ExamPage(QWidget):
         self.exit_secure_button.setVisible(bool(active))
         self.secure_session_indicator.setText("SECURE SESSION ACTIVE" if active else "WINDOWED SESSION")
         self.secure_session_indicator.setStyleSheet(
-            "background: #164e46; color: #79e3c6; padding: 7px; border-radius: 6px;" if active
-            else "background: #283142; color: #a5b6cd; padding: 7px; border-radius: 6px;"
+            panel_style("success" if active else "neutral")
         )
         if active and self._built_in:
             self.timeline_toggle.setChecked(False)
-        prefix = self.fps_label.text().split(" · ")[0]
+        prefix = self.fps_label.canonical_text.split(" · ")[0]
         self.fps_label.setText(f"{prefix} · Local CPU · {self._fps_hint()}")
 
     def _toggle_timeline(self, visible):
@@ -387,8 +401,8 @@ class ExamPage(QWidget):
     def start(self, student, exam, banner_seconds=3.0, break_config=None):
         self.reset()
         self.break_config = break_config or BreakConfig()
-        self.session_label.setText(f"{student} · {exam}")
-        self.session_label.setToolTip(f"{student} · {exam}")
+        self.session_label.setRawText(f"{student} · {exam}")
+        self.session_label.setRawToolTip(f"{student} · {exam}")
         self.banner_seconds = banner_seconds
 
     def _open_authorization(self):
@@ -447,7 +461,7 @@ class ExamPage(QWidget):
             if name in self.runtime_statuses:
                 title, widget = self.runtime_statuses[name]
                 apply_status(widget, state, detail)
-                widget.setText(f"{title}: {state}")
+                widget.setMessage("{component}: {state}", component=title, state=state)
                 if self._built_in:
                     widget.setStyleSheet(widget.styleSheet() + " font-size: 10px;")
             if name in mapping:
@@ -458,10 +472,14 @@ class ExamPage(QWidget):
         unavailable = face_state in ("UNAVAILABLE", "ERROR")
         self.face_tracking_notice.setVisible(unavailable)
         if unavailable:
-            self.face_tracking_notice.setText(
-                f"FACE TRACKING {face_state}: {detail or 'No technical details supplied'}\n"
-                "Student absence monitoring paused. YOLO monitoring continues."
-            )
+            if detail:
+                self.face_tracking_notice.setMessage(
+                    "FACE TRACKING {state}: {error}\nStudent absence monitoring paused. YOLO monitoring continues.",
+                    state=face_state, error=detail)
+            else:
+                self.face_tracking_notice.setMessage(
+                    "FACE TRACKING {state}: No technical details supplied\nStudent absence monitoring paused. YOLO monitoring continues.",
+                    state=face_state)
 
     def apply_update(self, update):
         self.assistant.set_risk(update.risk_score)
@@ -477,11 +495,13 @@ class ExamPage(QWidget):
                                         else "Current phone detection state")
         self.values["Head"].setText(update.face.head_direction.value)
         direction = update.face.head_direction.value
-        color = "#43c6a4" if direction == "CENTER" else "#91a3bb" if direction == "UNKNOWN" else "#ffd17c"
-        progress = (f" · {update.head_duration_seconds:.1f}/{update.head_threshold_seconds:g}s"
-                    if update.head_threshold_seconds is not None else "")
-        self.head_badge.setText(f"HEAD: {direction}{progress}")
-        self.head_badge.setStyleSheet(f"background: #182535; color: {color}; border-radius: 7px; padding: 8px; font-size: 18px; font-weight: 700;")
+        color = COLORS.success if direction == "CENTER" else COLORS.muted if direction == "UNKNOWN" else COLORS.warning
+        if update.head_threshold_seconds is not None:
+            self.head_badge.setMessage("HEAD: {direction} · {duration}/{threshold}s", direction=direction,
+                                       duration=f"{update.head_duration_seconds:.1f}", threshold=f"{update.head_threshold_seconds:g}")
+        else:
+            self.head_badge.setMessage("HEAD: {direction}", direction=direction)
+        self.head_badge.setStyleSheet(panel_style("success" if direction == "CENTER" else "neutral" if direction == "UNKNOWN" else "warning", padding=8, font_size=18))
         detail = ("Head pose unavailable: tracker unavailable or no single valid face/pose matrix."
                   if direction == "UNKNOWN" else "Live head pose; a sustained deviation emits an event after the configured threshold.")
         self.head_badge.setToolTip(detail)
@@ -493,7 +513,7 @@ class ExamPage(QWidget):
         color = RISK_COLORS[update.risk_level]
         self.risk_level.setStyleSheet(f"color: {color}; font-weight: 700;")
         self.risk_bar.setValue(update.risk_score)
-        self.risk_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
+        self.risk_bar.setStyleSheet(progress_style(color))
         fps_text = f"FPS: {update.fps:.1f}" if update.fps is not None else "FPS: warming up"
         self.fps_label.setText(f"{fps_text} · Local CPU · {self._fps_hint()}")
         self.face_warning.setVisible(update.face_missing_warning and update.face.status == FaceStatus.NO_FACE
@@ -511,10 +531,10 @@ class ExamPage(QWidget):
         self.assistant.handle_event(event)
         self._total_events += 1
         name = event.type.value.replace("_", " ")
-        item = QListWidgetItem(f"{event.timestamp:%H:%M:%S}  {name}\n{event.severity.value.upper()}  ·  +{event.risk_delta or 0} risk")
+        item = QListWidgetItem()
         item.setForeground(QColor(SEVERITY_COLORS[event.severity.value]))
         item.setData(Qt.ItemDataRole.UserRole, event)
-        item.setToolTip(event.message)
+        self._render_timeline_item(item, event)
         self.timeline.insertItem(0, item)
         while self.timeline.count() > TIMELINE_LIMIT:
             self.timeline.takeItem(self.timeline.count() - 1)
@@ -529,15 +549,27 @@ class ExamPage(QWidget):
         }.get(event.type, name)
         self.show_banner(banner_text, event.severity.value)
 
+    @staticmethod
+    def _render_timeline_item(item, event):
+        name = event.type.value.replace("_", " ")
+        item.setText(tr("{time}  {event}\n{severity}  ·  +{delta} risk", time=f"{event.timestamp:%H:%M:%S}",
+                        event=name, severity=event.severity.value.upper(), delta=event.risk_delta or 0))
+        item.setToolTip(tr(event.message))
+
+    def _retranslate_timeline(self, language=None):
+        for index in range(self.timeline.count()):
+            item = self.timeline.item(index)
+            self._render_timeline_item(item, item.data(Qt.ItemDataRole.UserRole))
+
     def show_banner(self, message, severity=None):
         self.banner.setText(message)
-        background, foreground = ("#862b3d", "white") if severity in ("high", "critical") else ("#164e46", "white") if severity == "info" else ("#553625", "#ffcd99")
-        self.banner.setStyleSheet(f"background: {background}; border-radius: 7px; color: {foreground}; font-weight: 700;")
+        kind = "critical" if severity in ("high", "critical") else "success" if severity == "info" else "warning"
+        self.banner.setStyleSheet(panel_style(kind))
         self.banner_timer.start(int(self.banner_seconds * 1000))
 
     def _clear_banner(self):
         self.banner.setText("LOCAL MONITORING ACTIVE")
-        self.banner.setStyleSheet("background: #1d3348; border-radius: 7px; color: #a7cff5; font-weight: 600;")
+        self.banner.setStyleSheet(panel_style("info"))
 
     def set_stopping(self):
         self.assistant.set_stopping()
@@ -557,7 +589,7 @@ class ExamPage(QWidget):
         self._built_in = False
         self._secure_mode_active = False
         self.secure_session_indicator.setText("WINDOWED SESSION")
-        self.secure_session_indicator.setStyleSheet("background: #283142; color: #a5b6cd; padding: 7px; border-radius: 6px;")
+        self.secure_session_indicator.setStyleSheet(panel_style("neutral"))
         if self._compact_monitoring:
             self.timeline_toggle.setChecked(True)
             self.technical_details_button.setChecked(False)
@@ -587,14 +619,14 @@ class ExamPage(QWidget):
         self.end_break_button.hide()
         self.end_break_button.setEnabled(True)
         self.head_badge.setText("HEAD: UNKNOWN")
-        self.head_badge.setStyleSheet("background: #182535; color: #91a3bb; border-radius: 7px; padding: 8px; font-size: 18px; font-weight: 700;")
+        self.head_badge.setStyleSheet(panel_style("neutral", padding=8, font_size=18))
         self.finish_button.setEnabled(True)
         for value in self.values.values():
             value.setText("—")
             value.setStyleSheet("")
             value.setToolTip("")
         for title, value in self.runtime_statuses.values():
-            value.setText(f"{title}: CHECKING")
-            value.setStyleSheet("color: #91a3bb;")
+            value.setMessage("{component}: {state}", component=title, state="CHECKING")
+            value.setStyleSheet(text_style(COLORS.muted))
             value.setToolTip("Component initialization pending")
         self._component_states.clear()

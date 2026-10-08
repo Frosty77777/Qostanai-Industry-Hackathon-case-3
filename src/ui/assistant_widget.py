@@ -10,19 +10,14 @@ from time import perf_counter
 import weakref
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+
+from i18n import language_manager, tr
 
 from .assistant_model import AssistantConfig, AssistantModel, AssistantPreferencesStore, AssistantState
-
-
-_STATE_COLORS = {
-    AssistantState.CALM: "#71d5bb",
-    AssistantState.NEUTRAL: "#8bbdf0",
-    AssistantState.ALERT: "#f3cc7a",
-    AssistantState.SERIOUS: "#f5a777",
-    AssistantState.CRITICAL: "#ee9aaa",
-}
+from .localized_widgets import QAction, QCheckBox, QLabel, QToolButton
+from .theme import ASSISTANT_COLORS, ASSISTANT_MESSAGE_STYLE, ASSISTANT_OPTIONS_STYLE, COLORS, text_style
 
 
 class AssistantPortrait(QWidget):
@@ -33,7 +28,8 @@ class AssistantPortrait(QWidget):
         self.config = config or AssistantConfig()
         self.state = AssistantState.CALM
         self._pixmap = QPixmap()
-        self.setAccessibleName("AI Proctor Assistant")
+        unsubscribe = language_manager.subscribe(self._retranslate_accessibility)
+        self.destroyed.connect(lambda: unsubscribe())
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.set_state(self.state, force=True)
 
@@ -48,8 +44,14 @@ class AssistantPortrait(QWidget):
         self.state = selected
         # Missing or corrupt PNGs yield a null pixmap and a useful placeholder.
         self._pixmap = QPixmap(str(self.config.asset_path(selected)))
-        self.setAccessibleDescription(f"{selected.value.title()} assistant. Drag to reposition within the assistant area.")
+        self._retranslate_accessibility()
         self.update()
+
+    def _retranslate_accessibility(self, language=None):
+        self.setAccessibleName(tr("AI Proctor Assistant"))
+        self.setAccessibleDescription(tr(
+            "{state} assistant. Drag to reposition within the assistant area.",
+            state=self.state.value.title()))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -66,15 +68,15 @@ class AssistantPortrait(QWidget):
                           (self.height() - min(self.size().width(), self.size().height())) / 2)
         scale = min(self.width(), self.height()) / 100
         painter.scale(scale, scale)
-        accent = QColor(_STATE_COLORS[self.state])
+        accent = QColor(ASSISTANT_COLORS[self.state.value])
         painter.setPen(QPen(accent, 3))
         painter.drawLine(QPointF(50, 12), QPointF(50, 23))
         painter.setBrush(accent)
         painter.drawEllipse(QRectF(46, 5, 8, 8))
-        painter.setBrush(QColor("#273e50"))
+        painter.setBrush(QColor(COLORS.robot_body))
         painter.drawRoundedRect(QRectF(15, 23, 70, 65), 17, 17)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#101c29"))
+        painter.setBrush(QColor(COLORS.robot_face))
         painter.drawRoundedRect(QRectF(24, 34, 52, 38), 10, 10)
         painter.setBrush(accent)
         for x in (37, 63):
@@ -109,7 +111,9 @@ class AssistantWidget(QFrame):
         self.setObjectName("assistantPanel")
         self.setStyleSheet("QFrame#assistantPanel { background: transparent; border: none; }")
         self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self.setAccessibleName("Draggable AI Proctor Assistant")
+        unsubscribe = language_manager.subscribe(self._retranslate_accessibility)
+        self.destroyed.connect(lambda: unsubscribe())
+        self._retranslate_accessibility()
         layout = QHBoxLayout(self) if self.compact else QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -123,9 +127,7 @@ class AssistantWidget(QFrame):
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.message_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.message_label.setAccessibleName("Assistant guidance")
-        self.message_label.setStyleSheet(
-            "QLabel#assistantMessage { color: #edf5ff; background: #203144; "
-            "border: 1px solid #43576e; border-radius: 9px; padding: 7px; font-size: 13px; }")
+        self.message_label.setStyleSheet(ASSISTANT_MESSAGE_STYLE)
         layout.addWidget(self.message_label, 1)
         self.installEventFilter(self)
         self.portrait.installEventFilter(self)
@@ -135,12 +137,15 @@ class AssistantWidget(QFrame):
     def state(self):
         return self.portrait.state
 
+    def _retranslate_accessibility(self, language=None):
+        self.setAccessibleName(tr("Draggable AI Proctor Assistant"))
+
     def set_state(self, state):
         self.portrait.set_state(state)
 
     def set_message(self, message):
         text = str(message)
-        if self.message_label.text() != text:
+        if self.message_label.canonical_text != text:
             self.message_label.setText(text)
             self.message_label.setAccessibleDescription(text)
 
@@ -225,7 +230,7 @@ class AssistantDock(QWidget):
         self.options_button.setAccessibleName("Assistant view options")
         self.options_button.setCheckable(True)
         self.options_button.setFixedHeight(24)
-        self.options_button.setStyleSheet("QToolButton { background: #223144; color: #d8e7f8; border: 1px solid #43576e; border-radius: 5px; padding: 2px 7px; font-size: 12px; }")
+        self.options_button.setStyleSheet(ASSISTANT_OPTIONS_STYLE)
         self.show_assistant_action = QAction("Show Assistant", self)
         self.show_assistant_action.setCheckable(True)
         self.show_messages_action = QAction("Show Assistant Messages", self)
@@ -239,8 +244,8 @@ class AssistantDock(QWidget):
         self.show_assistant_checkbox = QCheckBox("Show Assistant", self.options_panel)
         self.show_messages_checkbox = QCheckBox("Show Assistant Messages", self.options_panel)
         for checkbox in (self.show_assistant_checkbox, self.show_messages_checkbox):
-            checkbox.setStyleSheet("QCheckBox { color: #d8e7f8; font-size: 12px; }")
-            checkbox.setAccessibleName(checkbox.text())
+            checkbox.setStyleSheet(text_style(font_size=12))
+            checkbox.setAccessibleName(checkbox.source_text)
             inline.addWidget(checkbox)
         self.options_panel.setFixedHeight(24)
         self.options_panel.hide()

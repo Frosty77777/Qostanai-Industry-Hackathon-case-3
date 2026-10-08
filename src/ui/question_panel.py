@@ -2,14 +2,14 @@
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout,
-                               QHBoxLayout, QPlainTextEdit, QPushButton,
-                               QRadioButton, QScrollArea, QSizePolicy,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout,
+                               QHBoxLayout, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from monitoring import EventType
 from security import SecurityConfig
-from .theme import label
+from .localized_widgets import QCheckBox, QComboBox, QPlainTextEdit, QPushButton, QRadioButton
+from .theme import OPTION_INDICATOR_STYLE, label, navigation_style, panel_style
 
 MAX_NAVIGATOR_BUTTONS = 25
 
@@ -31,7 +31,6 @@ class AnswerTextEdit(QPlainTextEdit):
         self.setAcceptDrops(False)
         self.setPlaceholderText("Type your answer here…")
         self.setMinimumHeight(150)
-        self.setStyleSheet("QPlainTextEdit { background: #101925; border: 1px solid #35465d; border-radius: 7px; padding: 10px; }")
 
     def focusInEvent(self, event):
         super().focusInEvent(event)
@@ -144,7 +143,7 @@ class QuestionPanel(QFrame):
         self.submit_button.clicked.connect(self.submit_requested)
         layout.addWidget(self.submit_button)
         self.confirmation_panel = QFrame()
-        self.confirmation_panel.setStyleSheet("background: #28374b; border-radius: 7px;")
+        self.confirmation_panel.setStyleSheet(panel_style("info"))
         confirm = QVBoxLayout(self.confirmation_panel)
         self.confirmation_message = label("Submit exam? You will not be able to change your answers.")
         self.confirmation_message.setWordWrap(True)
@@ -170,7 +169,7 @@ class QuestionPanel(QFrame):
         self.attempt = attempt
         self._security = security_config or SecurityConfig()
         self.text_answer.suppress_paste = EventType.PASTE_ATTEMPT in self._security.blocked_events
-        self.exam_title.setText(attempt.exam.title)
+        self.exam_title.setRawText(attempt.exam.title)
         if len(attempt.exam.questions) > MAX_NAVIGATOR_BUTTONS:
             self.navigator_select.blockSignals(True)
             for index in range(len(attempt.exam.questions)):
@@ -218,8 +217,7 @@ class QuestionPanel(QFrame):
         for index, button in enumerate(self._navigator):
             answered = self.attempt.is_answered(self.attempt.exam.questions[index].id)
             button.setEnabled(self._active)
-            color = "#388ce6" if index == current else "#164e46" if answered else "#28374b"
-            button.setStyleSheet(f"background: {color}; padding: 5px;")
+            button.setStyleSheet(navigation_style(index == current, answered))
             button.setToolTip("Answered" if answered else "Unanswered")
 
     def _clear_options(self):
@@ -241,7 +239,7 @@ class QuestionPanel(QFrame):
         try:
             question = self.attempt.current_question
             kind = self._kind(question)
-            self.question_text.setText(question.text)
+            self.question_text.setRawText(question.text)
             self._clear_options()
             self.text_answer.hide()
             self.option_area.hide()
@@ -257,13 +255,10 @@ class QuestionPanel(QFrame):
                 for option in question.options:
                     widget = QRadioButton() if kind == "SINGLE_CHOICE" else QCheckBox()
                     widget.setProperty("option_value", option)
-                    widget.setAccessibleName(option)
+                    widget.setRawAccessibleName(option)
                     widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-                    widget.setToolTip(option)
-                    widget.setStyleSheet("QRadioButton, QCheckBox { padding: 8px 2px; }"
-                                        "QRadioButton::indicator, QCheckBox::indicator { width: 16px; height: 16px; background: #101925; border: 1px solid #91a3bb; }"
-                                        "QRadioButton::indicator { border-radius: 8px; } QCheckBox::indicator { border-radius: 3px; }"
-                                        "QRadioButton::indicator:checked, QCheckBox::indicator:checked { background: #388ce6; border: 2px solid #a7cff5; }")
+                    widget.setRawToolTip(option)
+                    widget.setStyleSheet(OPTION_INDICATOR_STYLE)
                     self._button_group.addButton(widget)
                     widget.setChecked(answer == option if kind == "SINGLE_CHOICE" else option in (answer or ()))
                     widget.toggled.connect(self._choice_changed)
@@ -272,7 +267,8 @@ class QuestionPanel(QFrame):
                     row_layout.setContentsMargins(0, 0, 0, 0)
                     row_layout.setSpacing(8)
                     row_layout.addWidget(widget)
-                    text = label(option)
+                    text = label("")
+                    text.setRawText(option)
                     text.setStyleSheet("font-size: 18px;")
                     text.setWordWrap(True)
                     text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
