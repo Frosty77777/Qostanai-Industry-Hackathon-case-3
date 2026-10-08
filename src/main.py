@@ -14,6 +14,7 @@ from security import SecurityMonitor
 from vision.yolo_detector import Detection, PHONE_ID, PERSON_ID, YoloDetector
 from vision.face_tracker import DEFAULT_MODEL_PATH, FaceResult, FaceStatus, FaceTracker
 from vision.detection_filters import display_detections, secondary_person_confidence
+from vision.phone_tracker import PhoneTracker
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOW_NAME = "Local proctoring prototype - Q to quit"
@@ -32,6 +33,11 @@ def parse_args(description: str | None = None) -> argparse.Namespace:
     parser.add_argument("--head-evidence", action="store_true", help="Also save evidence for emitted head-direction events (disabled by default)")
     parser.add_argument("--phone-conf", type=float, default=DEFAULT_EVENT_CONFIG.phone.minimum_confidence,
                         help="Application minimum phone confidence (default: 0.55)")
+    parser.add_argument("--phone-occlusion-grace", type=float,
+                        default=DEFAULT_EVENT_CONFIG.phone.occlusion_grace_seconds,
+                        help="Seconds to retain a previously observed phone through occlusion (default: 0.6)")
+    parser.add_argument("--no-phone-tracking", action="store_true",
+                        help="Disable temporal phone continuity and use raw confidence-qualified detections")
     parser.add_argument("--secondary-person-min-area", type=float,
                         default=DEFAULT_EVENT_CONFIG.multiple_persons.minimum_secondary_area_ratio,
                         help="Minimum secondary-person area / frame area (default: 0.02)")
@@ -50,6 +56,9 @@ def parse_args(description: str | None = None) -> argparse.Namespace:
         parser.error("--threads must be at least 1")
     if not 0 < args.phone_conf <= 1:
         parser.error("--phone-conf must be greater than 0 and at most 1")
+    from math import isfinite
+    if not isfinite(args.phone_occlusion_grace) or args.phone_occlusion_grace < 0:
+        parser.error("--phone-occlusion-grace must be finite and nonnegative")
     for name in ("area", "width", "height"):
         if not 0 <= getattr(args, f"secondary_person_min_{name}") <= 1:
             parser.error(f"--secondary-person-min-{name} must be between 0 and 1")
@@ -57,7 +66,10 @@ def parse_args(description: str | None = None) -> argparse.Namespace:
 
 
 def event_config_from_args(args) -> EventEngineConfig:
-    return replace(DEFAULT_EVENT_CONFIG, phone=PhoneDetectionConfig(args.phone_conf), multiple_persons=replace(
+    return replace(DEFAULT_EVENT_CONFIG, phone=replace(DEFAULT_EVENT_CONFIG.phone,
+        minimum_confidence=args.phone_conf,
+        occlusion_grace_seconds=getattr(args, "phone_occlusion_grace", DEFAULT_EVENT_CONFIG.phone.occlusion_grace_seconds),
+        tracking_enabled=not getattr(args, "no_phone_tracking", False)), multiple_persons=replace(
         DEFAULT_EVENT_CONFIG.multiple_persons,
         minimum_secondary_area_ratio=args.secondary_person_min_area,
         minimum_secondary_width_ratio=args.secondary_person_min_width,
@@ -129,6 +141,7 @@ def draw_preview(
     face: FaceResult | None = None, latest_event: ProctoringEvent | None = None,
     *, face_missing_warning: bool = False, risk_engine: RiskEngine | None = None,
     event_config: EventEngineConfig = DEFAULT_EVENT_CONFIG,
+    phone_state: str | None = None,
 ):
     """Draw boxes, confidence labels, and current-frame detection counts."""
     height, width = frame.shape[:2]
@@ -170,6 +183,11 @@ def draw_preview(
     for column, column_lines in enumerate((lines, face_lines)):
         for index, line in enumerate(column_lines):
             cv2.putText(preview, line, (10 + column * (width // 2), height + 25 + index * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    if phone_state is not None:
+        # Keep the original permanent labels and 100px evidence footer intact.
+        # The desktop also displays the state in its compact diagnostics.
+        cv2.putText(preview, f"Phone: {phone_state}", (10, height + STATUS_FOOTER_HEIGHT - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 180, 255), 1, cv2.LINE_AA)
     if risk_engine is not None:
         risk_lines = [
             f"SESSION RISK: {risk_engine.current_score} / 100",
@@ -225,6 +243,7 @@ def main() -> int:
     measured_frames = 0
     measured_seconds = 0.0
     event_engine = EventEngine(event_config_from_args(args))
+    phone_tracker = PhoneTracker(event_engine.config.phone) if event_engine.config.phone.tracking_enabled else None
     risk_engine = RiskEngine()
     security_monitor = SecurityMonitor()
     evidence_manager = EvidenceManager(EvidenceConfig(head_direction_enabled=args.head_evidence))
@@ -261,7 +280,11 @@ def main() -> int:
             # expiring latest-event banner. Returned faces and failures clear it.
             if face.status != FaceStatus.NO_FACE:
                 face_missing_warning = False
-            new_events = event_engine.update(frame_signals(detections, face, frame.shape, event_engine.config), now=event_now)
+            signals = frame_signals(detections, face, frame.shape, event_engine.config)
+            phone_tracking = phone_tracker.update(detections, frame.shape, now=event_now) if phone_tracker else None
+            if phone_tracking is not None:
+                signals = phone_tracking.apply_to(signals)
+            new_events = event_engine.update(signals, now=event_now)
             face_missing_warning = event_engine.condition_qualified(EventType.FACE_MISSING)
             new_events.extend(event_engine.record_security_events(security_monitor.poll()))
             for index, event in enumerate(new_events):
@@ -279,6 +302,7 @@ def main() -> int:
             preview = draw_preview(
                 cv2, frame, detections, fps, face, latest_event,
                 face_missing_warning=face_missing_warning, risk_engine=risk_engine, event_config=event_engine.config,
+                phone_state=phone_tracking.state.value if phone_tracking is not None else None,
             )
             if new_events:
                 # The first footer contains permanent CV labels. Both temporary

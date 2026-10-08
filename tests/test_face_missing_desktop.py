@@ -329,6 +329,34 @@ class FaceMissingDesktopChecks(unittest.TestCase):
         self.assertEqual([event.type for event in result.events], [EventType.FACE_MISSING])
         self.assertFalse(self.page().face_warning.isHidden())
 
+    def test_unconfirmed_quality_sample_does_not_clear_existing_absence_warning(self):
+        result = self.monitor([0, 3, 3.5, 4, 6],
+            frames=[usable_frame(), usable_frame(), reliability.BLACK,
+                    usable_frame(), usable_frame()],
+            faces=[reliability.ABSENT] * 5)
+        self.assertEqual([packet.face_missing_warning for packet in self.updates],
+                         [False, True, True, True, True])
+        self.assertFalse(any(packet.camera_obstructed_warning for packet in self.updates))
+        self.assertEqual([event.type for event in result.events], [EventType.FACE_MISSING])
+        self.assertEqual(result.risk_score, 15)
+        self.assertEqual(len(self.snapshots), 1)
+        self.assertFalse(self.page().face_warning.isHidden())
+
+    def test_confirmed_cover_in_cooldown_suppresses_absence_without_repeat_event(self):
+        result = self.monitor([0, 2, 3, 4, 6],
+            frames=[reliability.BLACK, reliability.BLACK, usable_frame(),
+                    reliability.BLACK, reliability.BLACK],
+            faces=[reliability.ABSENT] * 5)
+        self.assertEqual([event.type for event in result.events], [EventType.CAMERA_OBSTRUCTED])
+        self.assertTrue(self.updates[-1].camera_obstructed_warning)
+        self.assertFalse(self.updates[-1].face_missing_warning)
+        self.assertEqual(self.updates[-1].events, ())
+        self.assertEqual(result.risk_score, 20)
+        self.assertEqual(len(self.snapshots), 1)
+        page = self.page()
+        self.assertFalse(page.obstruction_warning.isHidden())
+        self.assertTrue(page.face_warning.isHidden())
+
     def test_worker_and_desktop_use_configured_absence_threshold(self):
         config = EventEngineConfig()
         rules = dict(config.rules)

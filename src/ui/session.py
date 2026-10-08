@@ -7,9 +7,11 @@ from pathlib import Path
 from time import perf_counter
 
 from evidence import EvidenceConfig
+from exams import ExamDefinition, ExamResult
 from monitoring import EventEngineConfig, ProctoringEvent, RiskConfig
 from monitoring.break_manager import BreakConfig
 from security import SecurityConfig
+from security.secure_window import SecureWindowConfig
 from session_storage import SessionStorageConfig
 from vision.face_tracker import DEFAULT_MODEL_PATH, FaceResult
 from vision.camera_quality import CameraQualityConfig
@@ -40,6 +42,17 @@ class SessionConfig:
     camera_quality: CameraQualityConfig = field(default_factory=CameraQualityConfig)
     breaks: BreakConfig = field(default_factory=BreakConfig)
     storage: SessionStorageConfig = field(default_factory=SessionStorageConfig)
+    exam_definition: ExamDefinition | None = None
+    secure_mode: str = "WINDOWED"
+    secure_window: SecureWindowConfig = field(default_factory=SecureWindowConfig)
+
+    def __post_init__(self):
+        if self.secure_mode not in {"WINDOWED", "MAXIMIZED", "FULLSCREEN"}:
+            raise ValueError("Secure mode must be WINDOWED, MAXIMIZED, or FULLSCREEN")
+        if self.exam_definition is not None and not isinstance(self.exam_definition, ExamDefinition):
+            raise TypeError("exam_definition must be an ExamDefinition or None")
+        if not isinstance(self.secure_window, SecureWindowConfig):
+            raise TypeError("secure_window must be a SecureWindowConfig")
 
 
 @dataclass(frozen=True)
@@ -59,6 +72,8 @@ class FrameUpdate:
     break_remaining_seconds: int = 0
     head_duration_seconds: float = 0.0
     head_threshold_seconds: float | None = None
+    phone_state: str = "NONE"
+    window_focus_lost: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +90,7 @@ class SessionResult:
     ended_at: datetime | None = None
     session_directory: Path | None = None
     persistence_error: str | None = None
+    exam_result: ExamResult | None = None
 
 
 class SessionTimer:

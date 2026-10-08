@@ -356,6 +356,10 @@ class SecurityMonitor:
     def keyboard_available(self) -> bool:
         return self._keyboard_available
 
+    @property
+    def current_focused(self) -> bool | None:
+        return self._last_focused if self._focus_available else None
+
     def _warn(self, component: str, error: str) -> None:
         if component not in self._warnings:
             print(f"[SECURITY] Warning: {component} unavailable ({error}). Webcam monitoring continues.", file=sys.stderr)
@@ -439,6 +443,38 @@ class SecurityMonitor:
                 self._keyboard_available = False
                 self._warn("keyboard listener", str(exc))
         return events
+
+    def record_application_paste(self, *, source: str, blocked: bool,
+                                 now: float | None = None) -> ProctoringEvent | None:
+        """Normalize a paste in our editor, including non-keyboard paste paths.
+
+        Called on the monitoring thread after poll(), sharing the native hook's
+        cooldown. This also works when global hooks are unavailable. The editor
+        reports actual suppression; this method does not prevent OS actions.
+        """
+        return self._emit(EventType.PASTE_ATTEMPT, self._clock() if now is None else now, {
+            "source": "exam_answer_editor", "paste_source": source,
+            "protected_window_focused": True,
+            "action": "BLOCKED" if blocked else "DETECTED", "blocked": bool(blocked),
+        })
+
+    def record_application_event(self, event_type: EventType, *, source: str,
+                                 blocked: bool = False, now: float | None = None) -> ProctoringEvent | None:
+        """Normalize observed application focus/Escape attempts with hook cooldowns.
+
+        Qt application deactivation covers brief focus losses before the next CV
+        poll. No arbitrary typed text, clipboard contents or OS prevention is
+        inferred. Application events remain available if native hooks fail.
+        """
+        event_type = EventType(event_type)
+        if event_type not in {EventType.WINDOW_FOCUS_LOST, EventType.ESCAPE_ATTEMPT}:
+            raise ValueError("Unsupported application security event")
+        if event_type == EventType.WINDOW_FOCUS_LOST:
+            blocked = False
+        return self._emit(event_type, self._clock() if now is None else now, {
+            "source": source, "action_scope": "application",
+            "action": "BLOCKED" if blocked else "DETECTED", "blocked": bool(blocked),
+        })
 
     def stop(self) -> None:
         backend, self._backend = self._backend, None

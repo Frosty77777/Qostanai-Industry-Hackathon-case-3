@@ -12,15 +12,27 @@ class CameraQualityConfig:
     dark_max_variance: float = 64.0
     uniform_max_variance: float = 4.0
     last_usable_max_age_seconds: float = 10.0
+    # A near-lens palm/cloth can be bright and have a soft illumination
+    # gradient, so global brightness/variance alone cannot identify it.
+    blur_check_enabled: bool = True
+    blur_max_variance: float = 1600.0
+    blur_max_laplacian_variance: float = 8.0
+    blur_edge_threshold: float = 24.0
+    blur_max_edge_fraction: float = 0.02
 
     def __post_init__(self):
         if any(type(value) is not int or value <= 0 for value in (self.sample_width, self.sample_height)):
             raise ValueError("Quality sample dimensions must be positive integers")
         if not isfinite(self.low_brightness) or not 0 <= self.low_brightness <= 255:
             raise ValueError("Brightness threshold must be between 0 and 255")
-        for value in (self.dark_max_variance, self.uniform_max_variance, self.last_usable_max_age_seconds):
+        for value in (self.dark_max_variance, self.uniform_max_variance, self.last_usable_max_age_seconds,
+                      self.blur_max_variance, self.blur_max_laplacian_variance, self.blur_edge_threshold):
             if not isfinite(value) or value < 0:
                 raise ValueError("Quality thresholds and cache age must be finite and nonnegative")
+        if type(self.blur_check_enabled) is not bool:
+            raise ValueError("Blur check enabled must be a boolean")
+        if not isfinite(self.blur_max_edge_fraction) or not 0 <= self.blur_max_edge_fraction <= 1:
+            raise ValueError("Blur edge fraction must be finite and between 0 and 1")
 
 
 @dataclass(frozen=True)
@@ -28,15 +40,24 @@ class CameraQuality:
     obstructed: bool
     mean_brightness: float
     grayscale_variance: float
+    laplacian_variance: float = 0.0
+    edge_fraction: float = 0.0
+    obstruction_reason: str | None = None
 
     def to_dict(self):
-        return {"mean_brightness": self.mean_brightness, "grayscale_variance": self.grayscale_variance}
+        return {"mean_brightness": self.mean_brightness, "grayscale_variance": self.grayscale_variance,
+                "laplacian_variance": self.laplacian_variance, "edge_fraction": self.edge_fraction,
+                "obstruction_reason": self.obstruction_reason}
 
 
 def analyze_camera_frame(frame, config: CameraQualityConfig) -> CameraQuality:
-    """Analyze raw pixels before boxes/text: dark AND flat, or nearly uniform.
+    """Analyze raw pixels before boxes/text for sustained low-detail covers.
 
-    Darkness alone is insufficient. A bright uniform cover also qualifies.
+    Darkness alone is insufficient. Uniform covers and softly textured,
+    out-of-focus covers also qualify. Sharp edges or substantial global
+    contrast keep ordinary textured/dim scenes usable. This is an image
+    quality heuristic; it cannot establish intent or distinguish every
+    covered lens from an equally featureless, out-of-focus scene.
     The Event Engine, rather than this stateless sampler, enforces persistence.
     """
     import cv2
@@ -44,9 +65,23 @@ def analyze_camera_frame(frame, config: CameraQualityConfig) -> CameraQuality:
     sample = cv2.resize(frame, (config.sample_width, config.sample_height), interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
     brightness, variance = float(gray.mean()), float(gray.var())
-    blocked = (variance <= config.uniform_max_variance
-               or (brightness <= config.low_brightness and variance <= config.dark_max_variance))
-    return CameraQuality(blocked, brightness, variance)
+    # Denoising prevents sensor grain in a dark cover from being mistaken for
+    # usable scene detail. All filtering stays on the small quality sample.
+    smooth = cv2.GaussianBlur(gray, (3, 3), 0)
+    laplacian = float(cv2.Laplacian(smooth, cv2.CV_32F).var())
+    gradient_x = cv2.Sobel(smooth, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(smooth, cv2.CV_32F, 0, 1, ksize=3)
+    edges = float((cv2.magnitude(gradient_x, gradient_y) >= config.blur_edge_threshold).mean())
+    reason = None
+    if variance <= config.uniform_max_variance:
+        reason = "uniform"
+    elif brightness <= config.low_brightness and variance <= config.dark_max_variance:
+        reason = "dark_flat"
+    elif (config.blur_check_enabled and variance <= config.blur_max_variance
+          and laplacian <= config.blur_max_laplacian_variance
+          and edges <= config.blur_max_edge_fraction):
+        reason = "low_detail_blur"
+    return CameraQuality(reason is not None, brightness, variance, laplacian, edges, reason)
 
 
 class RecentUsableFrame:

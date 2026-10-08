@@ -141,6 +141,10 @@ class SessionStore:
                 "event_counts": {str(key): value for key, value in result.event_counts.items()},
                 "error": result.error,
                 "persistence_error": getattr(result, "persistence_error", None),
+                "exam_result": (
+                    result.exam_result.to_dict()
+                    if getattr(result, "exam_result", None) is not None else None
+                ),
                 "schema_version": 1,
             }
             history = [self._event_dict(event, directory) for event in result.events]

@@ -1,0 +1,66 @@
+{
+  "id": "demo-technical-knowledge-v1",
+  "title": "Demo Technical Knowledge Exam",
+  "time_limit_seconds": null,
+  "questions": [
+    {
+      "id": "q1",
+      "type": "SINGLE_CHOICE",
+      "text": "Which component executes instructions in a computer?",
+      "options": ["CPU", "Monitor", "Keyboard", "Speaker"],
+      "correct_answer": "CPU"
+    },
+    {
+      "id": "q2",
+      "type": "SINGLE_CHOICE",
+      "text": "Which file format stores structured data as objects and arrays?",
+      "options": ["JPEG", "JSON", "MP3", "MP4"],
+      "correct_answer": "JSON"
+    },
+    {
+      "id": "q3",
+      "type": "MULTIPLE_CHOICE",
+      "text": "Select the input devices.",
+      "options": ["Keyboard", "Mouse", "Monitor", "Speaker"],
+      "correct_answer": ["Keyboard", "Mouse"]
+    },
+    {
+      "id": "q4",
+      "type": "TEXT",
+      "text": "In one or two sentences, explain why making backups is useful."
+    },
+    {
+      "id": "q5",
+      "type": "SINGLE_CHOICE",
+      "text": "What is the main purpose of an operating system?",
+      "options": ["Manage hardware and applications", "Print every file", "Replace all hardware", "Only play music"],
+      "correct_answer": "Manage hardware and applications"
+    },
+    {
+      "id": "q6",
+      "type": "MULTIPLE_CHOICE",
+      "text": "Select common programming languages.",
+      "options": ["Python", "Java", "HDMI", "USB"],
+      "correct_answer": ["Python", "Java"]
+    },
+    {
+      "id": "q7",
+      "type": "SINGLE_CHOICE",
+      "text": "Which unit is commonly used to express a file's size?",
+      "options": ["Byte", "Volt", "Hertz", "Meter"],
+      "correct_answer": "Byte"
+    },
+    {
+      "id": "q8",
+      "type": "TEXT",
+      "text": "Give one example of a useful task that software can automate."
+    },
+    {
+      "id": "q9",
+      "type": "MULTIPLE_CHOICE",
+      "text": "Select the practices that help protect an account.",
+      "options": ["Use a unique password", "Enable multi-factor authentication", "Share your password publicly", "Reuse one password everywhere"],
+      "correct_answer": ["Use a unique password", "Enable multi-factor authentication"]
+    }
+  ]
+}

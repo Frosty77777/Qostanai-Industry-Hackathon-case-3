@@ -12,6 +12,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
 from evidence import EvidenceManager
+from exams import ExamAttempt, ExamResult
 from main import draw_preview, format_event, frame_signals, open_webcam, STATUS_FOOTER_HEIGHT
 from monitoring import EventEngine, EventType, RiskEngine
 from monitoring.break_manager import BreakManager
@@ -20,6 +21,7 @@ from session_storage import SessionStore
 from vision.face_tracker import FaceResult, FaceStatus, FaceTracker
 from vision.camera_quality import RecentUsableFrame, analyze_camera_frame
 from vision.yolo_detector import YoloDetector
+from vision.phone_tracker import PhoneTracker
 from .session import FrameUpdate, SessionConfig, SessionResult, session_wall_time
 
 
@@ -122,6 +124,11 @@ class VisionWorker(QThread):
         self._stop_requested = Event()
         self._mailbox = UpdateMailbox()
         self._break_commands = Queue(maxsize=8)
+        self._paste_commands = Queue(maxsize=8)
+        self._application_security_commands = Queue(maxsize=8)
+        self._exam_lock = Lock()
+        self._exam_snapshot: ExamResult | None = None
+        self._exam_started_at = None
         self.result: SessionResult | None = None
         self.statuses = {name: ("CHECKING", "Initializing") for name in (
             "Camera", "AI Detection", "Face Tracking", "Security Monitor", "Evidence", "Session",
@@ -138,6 +145,70 @@ class VisionWorker(QThread):
 
     def take_update(self):
         return self._mailbox.take()
+
+    @property
+    def exam_started_at(self):
+        with self._exam_lock:
+            return self._exam_started_at
+
+    def set_exam_result(self, result: ExamResult):
+        """Receive immutable answer data; never access GUI-owned mutable state."""
+        if not isinstance(result, ExamResult):
+            raise TypeError("Expected an immutable ExamResult")
+        with self._exam_lock:
+            self._exam_snapshot = result
+
+    def request_paste_attempt(self, source: str, blocked: bool):
+        if self._stopping():
+            return False
+        try:
+            self._paste_commands.put_nowait((str(source), bool(blocked)))
+            return True
+        except Full:
+            # The same-event cooldown makes a bounded burst sufficient.
+            return False
+
+    def request_security_attempt(self, event_type, source: str, blocked: bool = False):
+        """Accept only observed focus/Escape signals from our own secure UI."""
+        try:
+            event_type = EventType(event_type)
+        except (ValueError, TypeError):
+            return False
+        if event_type not in {EventType.WINDOW_FOCUS_LOST, EventType.ESCAPE_ATTEMPT} or self._stopping():
+            return False
+        try:
+            self._application_security_commands.put_nowait((event_type, str(source), bool(blocked)))
+            return True
+        except Full:
+            return False
+
+    def _application_security(self, monitor, fallback, engine, now):
+        events = self._application_pastes(monitor, fallback, engine, now)
+        receiver = monitor if callable(getattr(monitor, "record_application_event", None)) else fallback
+        recorded = []
+        while True:
+            try:
+                kind, source, blocked = self._application_security_commands.get_nowait()
+            except Empty:
+                break
+            event = receiver.record_application_event(kind, source=source, blocked=blocked, now=now)
+            if event is not None:
+                recorded.append(event)
+        events.extend(engine.record_security_events(recorded))
+        return events
+
+    def _application_pastes(self, monitor, fallback, engine, now):
+        recorded = []
+        receiver = monitor if callable(getattr(monitor, "record_application_paste", None)) else fallback
+        while True:
+            try:
+                source, blocked = self._paste_commands.get_nowait()
+            except Empty:
+                break
+            event = receiver.record_application_paste(source=source, blocked=blocked, now=now)
+            if event is not None:
+                recorded.append(event)
+        return engine.record_security_events(recorded)
 
     def request_authorized_break(self, pin, duration_seconds):
         """Queue a command; only the worker's BreakManager may authorize it."""
@@ -206,7 +277,10 @@ class VisionWorker(QThread):
 
     def _security_status(self, monitor):
         if monitor.focus_available and monitor.keyboard_available:
-            self._status("Security Monitor", "ACTIVE", "Focus and keyboard detection active; blocking disabled by default")
+            suppression = ("configured foreground suppression: "
+                           + ", ".join(sorted(str(kind) for kind in self.config.security.blocked_events))
+                           if self.config.security.blocked_events else "blocking disabled by default")
+            self._status("Security Monitor", "ACTIVE", "Focus and keyboard detection active; " + suppression)
         elif monitor.focus_available or monitor.keyboard_available:
             self._status("Security Monitor", "ACTIVE", "Partial monitoring: " + (
                 "focus only; keyboard unavailable" if monitor.focus_available else "keyboard only; focus unavailable"))
@@ -216,8 +290,10 @@ class VisionWorker(QThread):
     def run(self):
         capture = tracker = security = None
         events = EventEngine(self.config.events, clock=self._clock, wall_clock=self._wall_clock)
+        phone_tracker = PhoneTracker(self.config.events.phone, clock=self._clock) if self.config.events.phone.tracking_enabled else None
         risk = RiskEngine(self.config.risk)
         breaks = BreakManager(self.config.breaks, wall_clock=self._wall_clock)
+        local_security = SecurityMonitor(self.config.security, clock=self._clock, wall_clock=self._wall_clock)
         recent_frame = RecentUsableFrame(self.config.camera_quality)
         started_at = None
         started_wall = None
@@ -296,6 +372,14 @@ class VisionWorker(QThread):
             if self._stopping():
                 return
             started_at = self._clock()
+            with self._exam_lock:
+                self._exam_started_at = started_wall
+                if self._exam_snapshot is None and self.config.exam_definition is not None:
+                    # Preserve even an unanswered attempt if the camera fails
+                    # before Qt has delivered session_started to the controller.
+                    attempt = ExamAttempt(self.config.exam_definition)
+                    attempt.start(started_wall)
+                    self._exam_snapshot = attempt.snapshot(submitted_at=started_wall, duration_seconds=0)
             self._status("Camera", "ACTIVE", f"Camera {self.config.camera_index} streaming")
             self._status("AI Detection", "ACTIVE", "Local YOLO11n inference on CPU")
             if tracker is not None and tracker.available:
@@ -343,6 +427,9 @@ class VisionWorker(QThread):
                 signals = replace(frame_signals(detections, face, frame.shape, events.config),
                                   camera_obstructed=quality.obstructed, camera_quality=quality.to_dict(),
                                   authorized_break=breaks.active)
+                phone_tracking = phone_tracker.update(detections, frame.shape, now=now) if phone_tracker else None
+                if phone_tracking is not None:
+                    signals = phone_tracking.apply_to(signals)
                 new_events.extend(events.update(signals, now=now))
                 obstruction_warning = events.condition_qualified(EventType.CAMERA_OBSTRUCTED)
                 # This is live episode state, independent of new_events and the
@@ -358,10 +445,14 @@ class VisionWorker(QThread):
                         self.notice.emit(f"Security monitoring unavailable: {exc}")
                         self._cleanup(security, "stop")
                         security = None
+                new_events.extend(self._application_security(security, local_security, events, now))
                 fps = len(durations) / sum(durations) if durations else None
                 # Existing renderer draws once: its permanent footer goes only
                 # into evidence, while the desktop receives the annotated image.
-                annotated = draw_preview(cv2, frame, detections, fps, face, event_config=events.config)
+                phone_state = (phone_tracking.state.value if phone_tracking is not None
+                               else "DETECTED" if signals.phone_detected else "NONE")
+                annotated = draw_preview(cv2, frame, detections, fps, face, event_config=events.config,
+                                         phone_state=phone_state)
                 evidence_frame = annotated[:frame.shape[0] + STATUS_FOOTER_HEIGHT]
                 recent_frame.remember(evidence_frame, quality, now)
                 enriched = []
@@ -393,6 +484,8 @@ class VisionWorker(QThread):
                     break_active=breaks.active, break_remaining_seconds=breaks.remaining_seconds(now),
                     head_duration_seconds=events.condition_duration(head_type) if head_type else 0.0,
                     head_threshold_seconds=events.config.rules[head_type].threshold_seconds if head_type else None,
+                    phone_state=phone_state,
+                    window_focus_lost=getattr(security, "current_focused", None) is False,
                 )
                 if self._mailbox.publish(update):
                     self.update_ready.emit(update)
@@ -412,6 +505,34 @@ class VisionWorker(QThread):
                     self._break_commands.get_nowait()
                 except Empty:
                     break
+            if started_at is not None:
+                # Preserve accepted attempts even when submission happens before
+                # the next inference frame. Native and local paste share cooldown.
+                final_events = []
+                if security is not None:
+                    try:
+                        final_events.extend(events.record_security_events(security.poll()))
+                    except Exception as exc:
+                        self.notice.emit(f"Security final poll unavailable: {exc}")
+                final_events.extend(self._application_security(security, local_security, events, self._clock()))
+                enriched = []
+                for event in final_events:
+                    event = risk.process(event)
+                    print(format_event(event, risk.current_score))
+                    enriched.append(event)
+                if enriched:
+                    events.history[-len(enriched):] = enriched
+            else:
+                while not self._paste_commands.empty():
+                    try:
+                        self._paste_commands.get_nowait()
+                    except Empty:
+                        break
+                while not self._application_security_commands.empty():
+                    try:
+                        self._application_security_commands.get_nowait()
+                    except Empty:
+                        break
             # Independent cleanup ensures one component failure cannot leak the
             # camera or hook. Finished is emitted by QThread only after run exits.
             for resource, cleanup in ((security, "stop"), (tracker, "close"), (capture, "release")):
@@ -422,6 +543,11 @@ class VisionWorker(QThread):
                         detail = f"Cleanup failed: {exc}"
                         self.notice.emit(detail)
                         error = error or detail
+            with self._exam_lock:
+                exam_result = self._exam_snapshot if started_at is not None else None
+            if exam_result is not None and exam_result.submission_reason == "interrupted":
+                exam_result = replace(exam_result, started_at=started_wall,
+                                      submitted_at=ended_wall, duration_seconds=duration)
             self.result = SessionResult(
                 self.config.student, self.config.exam,
                 duration,
@@ -429,6 +555,7 @@ class VisionWorker(QThread):
                 dict(risk.event_counts), error,
                 started_at=started_wall if started_at is not None else None, ended_at=ended_wall,
                 session_directory=session_directory, persistence_error=persistence_error,
+                exam_result=exam_result,
             )
             # Synchronous local writes stay on this worker and finish before its
             # finished signal. The controller joins before showing the report.

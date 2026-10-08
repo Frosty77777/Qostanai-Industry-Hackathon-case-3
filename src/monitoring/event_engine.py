@@ -85,13 +85,38 @@ def _default_rules() -> dict[EventType, EventRule]:
 
 @dataclass(frozen=True)
 class PhoneDetectionConfig:
-    """Application phone confidence, independent of YOLO's class-wide floor."""
+    """Application phone confidence and conservative temporal association.
+
+    Grace retains a probable phone only after multiple confident observations.
+    Event qualification still requires the existing observed-duration threshold;
+    unobserved grace time never contributes to that duration.
+    """
 
     minimum_confidence: float = 0.55
+    tracking_enabled: bool = True
+    occlusion_grace_seconds: float = 0.6
+    minimum_tracking_hits: int = 2
+    minimum_association_iou: float = 0.15
+    maximum_center_distance_ratio: float = 0.5
+    maximum_area_ratio: float = 2.5
 
     def __post_init__(self) -> None:
         if not isfinite(self.minimum_confidence) or not 0 < self.minimum_confidence <= 1:
             raise ValueError("Phone confidence must be finite and between 0 and 1")
+        if not isinstance(self.tracking_enabled, bool):
+            raise ValueError("Phone tracking_enabled must be a boolean")
+        if not isfinite(self.occlusion_grace_seconds) or self.occlusion_grace_seconds < 0:
+            raise ValueError("Phone occlusion grace must be finite and nonnegative")
+        if (isinstance(self.minimum_tracking_hits, bool)
+                or not isinstance(self.minimum_tracking_hits, int) or self.minimum_tracking_hits < 2):
+            raise ValueError("Phone tracking requires at least two confident hits")
+        if not isfinite(self.minimum_association_iou) or not 0 < self.minimum_association_iou <= 1:
+            raise ValueError("Phone association IoU must be finite and between 0 and 1")
+        if (not isfinite(self.maximum_center_distance_ratio)
+                or not 0 <= self.maximum_center_distance_ratio <= 1):
+            raise ValueError("Phone center distance ratio must be finite and between 0 and 1")
+        if not isfinite(self.maximum_area_ratio) or self.maximum_area_ratio < 1:
+            raise ValueError("Phone association area ratio must be finite and at least one")
 
     def accepts(self, confidence: float | None) -> bool:
         return (confidence is not None and isfinite(confidence)
@@ -173,6 +198,12 @@ class FrameSignals:
     camera_obstructed: bool = False
     camera_quality: dict[str, Any] | None = None
     authorized_break: bool = False
+    # Optional tracker data. Omitted fields retain the original raw-detection
+    # contract used by signal producers and existing engine integrations.
+    phone_tracking_state: str | None = None
+    phone_track_id: int | None = None
+    phone_observed_duration_seconds: float | None = None
+    phone_tracking_hits: int | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +266,7 @@ class EventEngine:
         self._states = {event_type: _ConditionState() for event_type in self.config.rules}
         self._last_update_at: float | None = None
         self._person_corroboration_started_at: float | None = None
+        self._phone_track_id: int | None = None
         self.history: list[ProctoringEvent] = []
 
     def record_security_events(self, events: Iterable[ProctoringEvent]) -> list[ProctoringEvent]:
@@ -287,6 +319,11 @@ class EventEngine:
         if not isfinite(now) or (self._last_update_at is not None and now < self._last_update_at):
             raise ValueError("Event time must be finite and nondecreasing")
         self._last_update_at = now
+        if (signals.phone_track_id is not None and self._phone_track_id is not None
+                and signals.phone_track_id != self._phone_track_id):
+            # Two unrelated boxes must not combine their persistence or latch.
+            self.reset_condition(EventType.PHONE_DETECTED)
+        self._phone_track_id = signals.phone_track_id
         single_face = signals.face_status == "FACE_DETECTED"
         validation = self.config.multiple_persons
         secondary_confidence = signals.persons_confidence
@@ -341,6 +378,15 @@ class EventEngine:
             duration = now - state.started_at
             if duration < rule.threshold_seconds:
                 continue
+            if event_type == EventType.PHONE_DETECTED and signals.phone_tracking_state is not None:
+                observed_duration = signals.phone_observed_duration_seconds
+                if (signals.phone_tracking_state != "DETECTED" or observed_duration is None
+                        or not isfinite(observed_duration) or observed_duration < rule.threshold_seconds
+                        or signals.phone_tracking_hits is None
+                        or signals.phone_tracking_hits < self.config.phone.minimum_tracking_hits):
+                    # Occlusion can preserve an episode, never qualify a new
+                    # violation using prediction or one isolated confident box.
+                    continue
             person_validation = None
             if event_type == EventType.MULTIPLE_PERSONS:
                 corroboration_duration = (
@@ -376,6 +422,14 @@ class EventEngine:
             }
             if person_validation is not None:
                 metadata["multiple_persons_validation"] = person_validation
+            if event_type == EventType.PHONE_DETECTED and signals.phone_tracking_state is not None:
+                metadata["phone_tracking"] = {
+                    "state": str(signals.phone_tracking_state),
+                    "track_id": signals.phone_track_id,
+                    "observed_duration_seconds": signals.phone_observed_duration_seconds,
+                    "confident_hits": signals.phone_tracking_hits,
+                    "occlusion_grace_seconds": self.config.phone.occlusion_grace_seconds,
+                }
             if event_type == EventType.CAMERA_OBSTRUCTED:
                 metadata["camera_quality"] = dict(signals.camera_quality or {})
             event = ProctoringEvent(

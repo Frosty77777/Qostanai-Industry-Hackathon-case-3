@@ -59,6 +59,19 @@ DEFAULT_CONFIG = FaceTrackerConfig()
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "face_landmarker.task"
 
 
+def prepare_face_tracking_runtime():
+    """Import optional MediaPipe before Qt installs its module inspection hook.
+
+    PySide6's hook cannot inspect six.moves virtual modules on Python 3.12
+    while MediaPipe imports Matplotlib/dateutil. The desktop calls this before
+    importing Qt; actual task/model creation remains in the CV worker.
+    Import failures are handled by the caller, without modifying import hooks.
+    """
+    import mediapipe
+
+    return mediapipe
+
+
 @dataclass(frozen=True)
 class FaceResult:
     status: FaceStatus
@@ -120,7 +133,7 @@ class FaceTracker:
         self._last_timestamp_ms = -1
         try:
             import cv2
-            import mediapipe as mp
+            mp = prepare_face_tracking_runtime()
 
             model_path = Path(model_path).expanduser().resolve()
             if not model_path.is_file():
