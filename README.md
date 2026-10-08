@@ -30,6 +30,10 @@ and evidence locally. The original OpenCV-only CLI remains available.
 - English, Russian, and Kazakh presentation with a persisted Setup language selector.
 - A centralized light academic theme with readable status and warning colors.
 
+Команда: Nurbik
+Капитан команды :Бектасов Нұрбақ Нұрғалиұлы
+Сокомнадники: Усербай Даниал Медетұлы, Жаныбек Алихан Жаныбекұлы, Аринов Рамазан Болатович , Әбдіқасым Зейін Әсетұлы.
+
 ## Architecture
 
 ```text
