@@ -1,7 +1,7 @@
 """Setup fields and asynchronous preflight status."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QComboBox, QFormLayout, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFormLayout, QGridLayout, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .theme import apply_status, card, label
 
@@ -41,14 +41,19 @@ class SetupPage(QWidget):
         layout.addLayout(form)
         layout.addWidget(label("SYSTEM STATUS", role="heading"))
         self.status_labels = {}
-        for name in ("Camera", "AI Detection", "Face Tracking", "Security Monitor"):
+        status_grid = QGridLayout()
+        status_grid.setHorizontalSpacing(24)
+        status_grid.setVerticalSpacing(10)
+        names = ("Camera", "AI Detection", "Face Tracking", "Security Monitor", "Evidence", "Session")
+        for index, name in enumerate(names):
             row = QHBoxLayout()
-            row.addWidget(label(name))
+            row.addWidget(label("YOLO" if name == "AI Detection" else name))
             row.addStretch()
             status = label("CHECKING", role="muted")
             self.status_labels[name] = status
             row.addWidget(status)
-            layout.addLayout(row)
+            status_grid.addLayout(row, index // 2, index % 2)
+        layout.addLayout(status_grid)
         self.message = label("Checking cameras and local model availability…", role="muted")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)

@@ -304,12 +304,22 @@ class EventEngine:
                 self._person_corroboration_started_at = now
         else:
             self._person_corroboration_started_at = None
+        # A raw low-texture/dark sample is only an obstruction candidate.
+        # Short candidates must not restart otherwise continuous face absence.
+        # Use the current duration (including this sample), not last frame's
+        # warning or event emission: a qualified cover wins even in cooldown.
+        obstruction_state = self._states[EventType.CAMERA_OBSTRUCTED]
+        obstruction_confirmed = (
+            signals.camera_obstructed and obstruction_state.started_at is not None
+            and now - obstruction_state.started_at
+            >= self.config.rules[EventType.CAMERA_OBSTRUCTED].threshold_seconds
+        )
         conditions = {
             EventType.PHONE_DETECTED: signals.phone_detected and self.config.phone.accepts(signals.phone_confidence),
             EventType.MULTIPLE_PERSONS: secondary_valid,
             EventType.MULTIPLE_FACES: signals.face_status == "MULTIPLE_FACES",
             EventType.FACE_MISSING: (signals.face_status == "NO_FACE"
-                                     and not signals.authorized_break and not signals.camera_obstructed),
+                                     and not signals.authorized_break and not obstruction_confirmed),
             EventType.LOOK_LEFT: single_face and signals.head_direction == "LEFT",
             EventType.LOOK_RIGHT: single_face and signals.head_direction == "RIGHT",
             EventType.LOOK_UP: single_face and signals.head_direction == "UP",

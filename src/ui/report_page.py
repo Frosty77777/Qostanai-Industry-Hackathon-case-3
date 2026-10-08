@@ -1,10 +1,90 @@
-"""In-memory completion summary; full reports are intentionally deferred."""
+"""Completed-session summary and full event timeline for human review."""
+from collections import Counter
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFormLayout, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QAbstractItemView, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView,
+    QProgressBar, QPushButton, QScrollArea, QTableView, QTabWidget, QVBoxLayout, QWidget,
+)
+from monitoring import EventType
+from .evidence_viewer import EvidenceGallery
+from .session import DISPLAY_TIMEZONE, format_duration
+from .theme import RISK_COLORS, SEVERITY_COLORS, card, label
 
-from .session import format_duration
-from .theme import RISK_COLORS, card, label
+EVENT_LABELS = {
+    EventType.PHONE_DETECTED: "Phone detected",
+    EventType.MULTIPLE_PERSONS: "Multiple persons",
+    EventType.MULTIPLE_FACES: "Multiple faces",
+    EventType.FACE_MISSING: "Face missing",
+    EventType.CAMERA_OBSTRUCTED: "Camera obstructed",
+    EventType.LOOK_LEFT: "Head left",
+    EventType.LOOK_RIGHT: "Head right",
+    EventType.LOOK_UP: "Head up",
+    EventType.LOOK_DOWN: "Head down",
+    EventType.ALT_TAB_ATTEMPT: "Alt+Tab attempts",
+    EventType.WINDOW_FOCUS_LOST: "Window focus lost",
+    EventType.COPY_ATTEMPT: "Copy attempts",
+    EventType.PASTE_ATTEMPT: "Paste attempts",
+    EventType.PRINTSCREEN_ATTEMPT: "PrintScreen attempts",
+    EventType.ESCAPE_ATTEMPT: "Escape attempts",
+    EventType.AUTHORIZED_BREAK_STARTED: "Authorized break started",
+    EventType.AUTHORIZED_BREAK_ENDED: "Authorized break ended",
+    EventType.AUTHORIZED_BREAK_EXPIRED: "Authorized break expired",
+}
+SUMMARY_TYPES = tuple(kind for kind in EVENT_LABELS if not kind.value.startswith("AUTHORIZED_BREAK"))
+
+
+def display_time(timestamp):
+    if timestamp is None:
+        return "—"
+    # Older imported naive values stay readable without assuming host timezone.
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(DISPLAY_TIMEZONE)
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
+class EventTimelineModel(QAbstractTableModel):
+    """Qt requests visible rows; long sessions need no per-event widgets."""
+    HEADERS = ("Time (UTC+5)", "Event", "Severity", "Risk delta", "Message")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.events = ()
+
+    def set_events(self, events):
+        self.beginResetModel()
+        self.events = tuple(events)
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.events)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self.HEADERS[section]
+        return super().headerData(section, orientation, role)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self.events):
+            return None
+        event = self.events[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            values = (display_time(event.timestamp), EVENT_LABELS.get(event.type, str(event.type)),
+                      event.severity.value.upper(), f"{event.risk_delta or 0:+d}", event.message)
+            return values[index.column()]
+        if role == Qt.ItemDataRole.ForegroundRole and index.column() == 2:
+            return QColor(SEVERITY_COLORS.get(event.severity.value, "#91a3bb"))
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return (f"{event.type.value} · {display_time(event.timestamp)} (UTC+5)\n"
+                    f"{event.severity.value.upper()} · {event.risk_delta or 0:+d} risk\n"
+                    f"{event.message}\n{event.evidence_path or 'No webcam evidence'}")
+        if role == Qt.ItemDataRole.TextAlignmentRole and index.column() in (2, 3):
+            return Qt.AlignmentFlag.AlignCenter
+        return None
 
 
 class ReportPage(QWidget):
@@ -13,50 +93,173 @@ class ReportPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
-        root.addStretch()
-        panel, layout = card()
-        panel.setMinimumWidth(600)
-        panel.setMaximumWidth(650)
-        layout.setContentsMargins(36, 32, 36, 32)
-        layout.setSpacing(20)
-        layout.addWidget(label("SESSION COMPLETE", role="title"))
-        layout.addWidget(label("Monitoring stopped. Session details remain available in this window.", role="muted"))
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
+        header = QHBoxLayout()
+        header.addWidget(label("SESSION REPORT", role="title"), 1)
+        self.view_button = QPushButton("VIEW EVIDENCE")
+        self.view_button.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+        header.addWidget(self.view_button)
+        self.new_button = QPushButton("NEW SESSION")
+        self.new_button.setObjectName("primary")
+        self.new_button.clicked.connect(self.new_session_requested)
+        header.addWidget(self.new_button)
+        root.addLayout(header)
+        self.message = label("Review suspicious events and supporting images before drawing conclusions.", role="muted")
+        self.message.setWordWrap(True)
+        root.addWidget(self.message)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        summary = QWidget()
+        summary_layout = QVBoxLayout(summary)
+        summary_layout.setContentsMargins(16, 16, 16, 16)
+        summary_layout.setSpacing(16)
+        overview = QHBoxLayout()
+        metadata, metadata_layout = card("SESSION DETAILS · UTC+5")
         form = QFormLayout()
-        form.setSpacing(18)
+        form.setSpacing(12)
         self.values = {}
-        for name in ("Student", "Exam", "Duration", "Final Risk", "Total Events"):
+        for name in ("Student", "Exam", "Start time", "End time", "Duration"):
             value = label("—")
             value.setWordWrap(True)
             form.addRow(name, value)
             self.values[name] = value
-        layout.addLayout(form)
-        self.message = label("The full report and evidence viewer will be available in a later update.", role="muted")
-        self.message.setWordWrap(True)
-        layout.addWidget(self.message)
-        self.view_button = QPushButton("VIEW REPORT")
-        self.view_button.setEnabled(False)
-        self.view_button.setToolTip("Full report UI is not implemented yet")
-        layout.addWidget(self.view_button)
-        self.new_button = QPushButton("NEW SESSION")
-        self.new_button.setObjectName("primary")
-        self.new_button.clicked.connect(self.new_session_requested)
-        layout.addWidget(self.new_button)
-        root.addWidget(panel, 0, Qt.AlignmentFlag.AlignHCenter)
-        root.addStretch()
+        metadata_layout.addLayout(form)
+        overview.addWidget(metadata, 3)
+        risk_panel, risk_layout = card("FINAL SESSION RISK")
+        self.risk_score = label("0 / 100", size=44)
+        self.risk_level = label("LOW", size=22)
+        self.risk_bar = QProgressBar()
+        self.risk_bar.setRange(0, 100)
+        self.risk_bar.setTextVisible(False)
+        risk_layout.addWidget(self.risk_score)
+        risk_layout.addWidget(self.risk_level)
+        risk_layout.addWidget(self.risk_bar)
+        self.values["Final Risk"] = label("—")
+        risk_layout.addWidget(self.values["Final Risk"])
+        risk_layout.addStretch()
+        overview.addWidget(risk_panel, 2)
+        summary_layout.addLayout(overview)
+
+        totals_panel, totals_layout = card()
+        totals = QHBoxLayout()
+        self.severity_values = {}
+        for text, key in (("TOTAL EVENTS", "total"), ("CRITICAL", "critical"),
+                          ("HIGH", "high"), ("MEDIUM", "medium"), ("INFO / BREAK", "info")):
+            column = QVBoxLayout()
+            column.addWidget(label(text, role="heading"))
+            value = label("0", size=28)
+            if key != "total":
+                value.setStyleSheet(f"font-size: 28px; font-weight: 600; color: {SEVERITY_COLORS[key]};")
+            self.severity_values[key] = value
+            column.addWidget(value)
+            totals.addLayout(column, 1)
+        self.values["Total Events"] = self.severity_values["total"]
+        totals_layout.addLayout(totals)
+        summary_layout.addWidget(totals_panel)
+
+        counts_panel, counts_layout = card("SUMMARY")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(40)
+        grid.setVerticalSpacing(9)
+        self.summary_values = {}
+        for i, kind in enumerate(SUMMARY_TYPES):
+            row, column = i % 8, i // 8 * 2
+            grid.addWidget(label(EVENT_LABELS[kind]), row, column)
+            value = label("0")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self.summary_values[kind] = value
+            grid.addWidget(value, row, column + 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(2, 1)
+        counts_layout.addLayout(grid)
+        note = label("Totals include authorized-break entries. These informational entries add no risk.", role="muted")
+        note.setWordWrap(True)
+        counts_layout.addWidget(note)
+        summary_layout.addWidget(counts_panel)
+        summary_layout.addStretch()
+        scroll.setWidget(summary)
+        self.tabs.addTab(scroll, "Summary")
+
+        timeline_page = QWidget()
+        timeline_layout = QVBoxLayout(timeline_page)
+        timeline_layout.setContentsMargins(16, 16, 16, 16)
+        self.timeline_count = label("0 events · chronological order · UTC+5", role="muted")
+        timeline_layout.addWidget(self.timeline_count)
+        self.timeline_model = EventTimelineModel(self)
+        self.timeline = QTableView()
+        self.timeline.setModel(self.timeline_model)
+        self.timeline.setAlternatingRowColors(True)
+        self.timeline.setWordWrap(True)
+        self.timeline.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.timeline.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.timeline.verticalHeader().hide()
+        self.timeline.verticalHeader().setDefaultSectionSize(60)
+        for column, width in enumerate((180, 215, 95, 90)):
+            self.timeline.setColumnWidth(column, width)
+            self.timeline.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        self.timeline.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.timeline.horizontalHeader().setMinimumSectionSize(70)
+        timeline_layout.addWidget(self.timeline, 1)
+        self.tabs.addTab(timeline_page, "Full timeline")
+        self.evidence = EvidenceGallery(EVENT_LABELS, display_time, self)
+        self.tabs.addTab(self.evidence, "Evidence")
 
     def set_result(self, result):
         self.values["Student"].setText(result.student)
         self.values["Exam"].setText(result.exam)
+        self.values["Start time"].setText(display_time(result.started_at))
+        self.values["End time"].setText(display_time(result.ended_at))
         self.values["Duration"].setText(format_duration(result.duration_seconds))
+        color = RISK_COLORS.get(result.risk_level, "#91a3bb")
+        self.risk_score.setText(f"{result.risk_score} / 100")
+        self.risk_score.setStyleSheet(f"font-size: 44px; font-weight: 700; color: {color};")
+        self.risk_level.setText(result.risk_level)
+        self.risk_level.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {color};")
+        self.risk_bar.setValue(result.risk_score)
+        self.risk_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; }}")
         self.values["Final Risk"].setText(f"{result.risk_score} / 100 · {result.risk_level}")
-        self.values["Final Risk"].setStyleSheet(f"color: {RISK_COLORS[result.risk_level]}; font-weight: 600;")
+        counts = Counter(event.type for event in result.events)
+        severities = Counter(event.severity.value for event in result.events)
         self.values["Total Events"].setText(str(len(result.events)))
+        for severity, value in self.severity_values.items():
+            if severity != "total":
+                value.setText(str(severities[severity]))
+        for kind, value in self.summary_values.items():
+            value.setText(str(counts[kind]))
+        self.timeline_model.set_events(result.events)
+        self.timeline_count.setText(f"{len(result.events)} events · chronological order · UTC+5")
+        self.evidence.set_result(result)
+        messages = []
         if result.error:
-            self.message.setText(f"Session ended with a component error: {result.error}\nEvents and saved evidence were retained.")
-        else:
-            self.message.setText("The full report and evidence viewer will be available in a later update.")
+            messages.append(f"Session ended with a component error: {result.error}")
+        if result.persistence_error:
+            messages.append(f"Local save failed: {result.persistence_error}. The in-memory report remains available.")
+        elif result.session_directory:
+            messages.append(f"Saved locally: {result.session_directory}")
+        messages.append("Review suspicious events and supporting images before drawing conclusions.")
+        self.message.setText("\n".join(messages))
+        self.tabs.setCurrentIndex(0)
 
     def reset(self):
         for value in self.values.values():
             value.setText("—")
-        self.message.setText("The full report and evidence viewer will be available in a later update.")
+        for value in self.severity_values.values():
+            value.setText("0")
+        for value in self.summary_values.values():
+            value.setText("0")
+        self.risk_score.setText("0 / 100")
+        self.risk_score.setStyleSheet("font-size: 44px; font-weight: 700; color: #43c6a4;")
+        self.risk_level.setText("LOW")
+        self.risk_level.setStyleSheet("font-size: 22px; font-weight: 600; color: #43c6a4;")
+        self.risk_bar.setValue(0)
+        self.timeline_model.set_events(())
+        self.timeline_count.setText("0 events · chronological order · UTC+5")
+        self.evidence.clear()
+        self.message.setText("Review suspicious events and supporting images before drawing conclusions.")
+        self.tabs.setCurrentIndex(0)
+

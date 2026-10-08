@@ -87,6 +87,12 @@ class ExamPage(QWidget):
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet("background: #1d3348; border-radius: 7px; color: #a7cff5; font-weight: 600;")
         video_column.addWidget(self.banner)
+        self.face_tracking_notice = label("")
+        self.face_tracking_notice.setWordWrap(True)
+        self.face_tracking_notice.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.face_tracking_notice.setStyleSheet("background: #283142; color: #ffd17c; padding: 8px; border-radius: 7px;")
+        self.face_tracking_notice.hide()
+        video_column.addWidget(self.face_tracking_notice)
         self.video = VideoPreview()
         # Warning widgets share the video grid, so they stay prominent without
         # pushing the timeline off a laptop screen. Evidence pixels omit them.
@@ -153,6 +159,17 @@ class ExamPage(QWidget):
         video_column.addWidget(video_container, 1)
         self.fps_label = label("FPS: warming up · Local CPU processing · Q: finish exam", role="muted")
         video_column.addWidget(self.fps_label)
+        status_grid = QGridLayout()
+        status_grid.setVerticalSpacing(5)
+        self.runtime_statuses = {}
+        self._component_states = {}
+        for index, name in enumerate(("Camera", "AI Detection", "Face Tracking", "Security Monitor", "Evidence", "Session")):
+            title = {"AI Detection": "YOLO", "Security Monitor": "SECURITY"}.get(name, name.upper())
+            status = label(f"{title}: CHECKING")
+            status.setToolTip("Component initialization pending")
+            self.runtime_statuses[name] = (title, status)
+            status_grid.addWidget(status, index // 3, index % 3)
+        video_column.addLayout(status_grid)
         body.addLayout(video_column, 1)
         sidebar = QWidget()
         sidebar.setMinimumWidth(340)
@@ -254,10 +271,25 @@ class ExamPage(QWidget):
     def set_statuses(self, statuses):
         mapping = {"Camera": "Camera", "AI Detection": "AI Detection", "Security Monitor": "Security"}
         for name, (state, detail) in statuses.items():
+            if self._component_states.get(name) == (state, detail):
+                continue
+            self._component_states[name] = (state, detail)
+            if name in self.runtime_statuses:
+                title, widget = self.runtime_statuses[name]
+                apply_status(widget, state, detail)
+                widget.setText(f"{title}: {state}")
             if name in mapping:
                 apply_status(self.values[mapping[name]], state, detail)
         if statuses.get("Face Tracking", (None,))[0] == "UNAVAILABLE":
             self.values["Face"].setToolTip(statuses["Face Tracking"][1])
+        face_state, detail = self._component_states.get("Face Tracking", (None, ""))
+        unavailable = face_state in ("UNAVAILABLE", "ERROR")
+        self.face_tracking_notice.setVisible(unavailable)
+        if unavailable:
+            self.face_tracking_notice.setText(
+                f"FACE TRACKING {face_state}: {detail or 'No technical details supplied'}\n"
+                "Student absence monitoring paused. YOLO monitoring continues."
+            )
 
     def apply_update(self, update):
         self.video.set_image(update.image)
@@ -284,7 +316,8 @@ class ExamPage(QWidget):
         self.risk_level.setStyleSheet(f"color: {color}; font-weight: 700;")
         self.risk_bar.setValue(update.risk_score)
         self.risk_bar.setStyleSheet(f"QProgressBar::chunk {{ background: {color}; border-radius: 4px; }}")
-        self.fps_label.setText(f"FPS: {update.fps:.1f}" if update.fps is not None else "FPS: warming up")
+        fps_text = f"FPS: {update.fps:.1f}" if update.fps is not None else "FPS: warming up"
+        self.fps_label.setText(f"{fps_text} · Local CPU · Q: finish exam")
         self.face_warning.setVisible(update.face_missing_warning and update.face.status == FaceStatus.NO_FACE
                                      and not update.break_active and not update.camera_obstructed_warning)
         self.obstruction_warning.setVisible(update.camera_obstructed_warning)
@@ -315,11 +348,12 @@ class ExamPage(QWidget):
             EventType.WINDOW_FOCUS_LOST: "EXAM WINDOW LOST FOCUS",
             EventType.CAMERA_OBSTRUCTED: "CAMERA VIEW OBSTRUCTED",
         }.get(event.type, name)
-        self.show_banner(banner_text)
+        self.show_banner(banner_text, event.severity.value)
 
-    def show_banner(self, message):
+    def show_banner(self, message, severity=None):
         self.banner.setText(message)
-        self.banner.setStyleSheet("background: #553625; border-radius: 7px; color: #ffcd99; font-weight: 700;")
+        background, foreground = ("#862b3d", "white") if severity in ("high", "critical") else ("#164e46", "white") if severity == "info" else ("#553625", "#ffcd99")
+        self.banner.setStyleSheet(f"background: {background}; border-radius: 7px; color: {foreground}; font-weight: 700;")
         self.banner_timer.start(int(self.banner_seconds * 1000))
 
     def _clear_banner(self):
@@ -346,6 +380,8 @@ class ExamPage(QWidget):
         self.risk_level.setStyleSheet(f"color: {RISK_COLORS['LOW']}; font-weight: 700;")
         self.risk_bar.setValue(0)
         self.video.reset()
+        self.face_tracking_notice.clear()
+        self.face_tracking_notice.hide()
         self.face_warning.hide()
         self.obstruction_warning.hide()
         self.break_banner.hide()
@@ -361,3 +397,8 @@ class ExamPage(QWidget):
             value.setText("—")
             value.setStyleSheet("")
             value.setToolTip("")
+        for title, value in self.runtime_statuses.values():
+            value.setText(f"{title}: CHECKING")
+            value.setStyleSheet("color: #91a3bb;")
+            value.setToolTip("Component initialization pending")
+        self._component_states.clear()

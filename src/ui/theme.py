@@ -33,6 +33,11 @@ QScrollBar:vertical { background: #172130; width: 9px; }
 QScrollBar::handle:vertical { background: #42556f; border-radius: 4px; min-height: 28px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 QToolTip { color: #e6ecf5; background: #243247; border: 1px solid #42556f; }
+QTabWidget::pane { border: 1px solid #2a3749; border-radius: 8px; }
+QTabBar::tab { background: #192230; color: #a5b6cd; padding: 10px 24px; margin-right: 4px; }
+QTabBar::tab:selected { background: #283f58; color: white; }
+QTableView { background: #121b27; alternate-background-color: #182230; border: 1px solid #2a3749; gridline-color: #263345; selection-background-color: #293c53; }
+QHeaderView::section { background: #243247; color: #a5b6cd; padding: 8px; border: none; font-weight: 600; }
 """
 
 

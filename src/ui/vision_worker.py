@@ -16,10 +16,11 @@ from main import draw_preview, format_event, frame_signals, open_webcam, STATUS_
 from monitoring import EventEngine, EventType, RiskEngine
 from monitoring.break_manager import BreakManager
 from security import SecurityMonitor, WindowsSecurityBackend
+from session_storage import SessionStore
 from vision.face_tracker import FaceResult, FaceStatus, FaceTracker
 from vision.camera_quality import RecentUsableFrame, analyze_camera_frame
 from vision.yolo_detector import YoloDetector
-from .session import FrameUpdate, SessionConfig, SessionResult
+from .session import FrameUpdate, SessionConfig, SessionResult, session_wall_time
 
 
 def frame_to_image(frame) -> QImage:
@@ -69,6 +70,9 @@ class CameraDiscoveryWorker(QThread):
             "Face Tracking": ("UNAVAILABLE", "MediaPipe or local face model missing"),
             "Security Monitor": ("READY" if sys.platform == "win32" else "UNAVAILABLE",
                                  "Windows hooks and focus are checked when the session starts"),
+            "Evidence": ("READY", "Local image saving checked when the session starts"),
+            "Session": ("READY" if self.config.storage.enabled else "UNAVAILABLE",
+                        "Local session folder checked at start" if self.config.storage.enabled else "Persistence disabled"),
         }
         try:
             if self.config.weights.is_file() and all(importlib.util.find_spec(name) for name in ("torch", "ultralytics")):
@@ -107,18 +111,20 @@ class VisionWorker(QThread):
 
     def __init__(self, config: SessionConfig, parent=None, *, clock=perf_counter,
                  camera_opener=open_webcam, detector_factory=YoloDetector,
-                 face_factory=FaceTracker, security_factory=None, evidence_factory=EvidenceManager):
+                 face_factory=FaceTracker, security_factory=None, evidence_factory=EvidenceManager,
+                 store_factory=SessionStore, wall_clock=session_wall_time):
         super().__init__(parent)
         self.config, self._clock = config, clock
         self._camera_opener, self._detector_factory = camera_opener, detector_factory
         self._face_factory, self._evidence_factory = face_factory, evidence_factory
+        self._store_factory, self._wall_clock = store_factory, wall_clock
         self._security_factory = security_factory or self._make_security
         self._stop_requested = Event()
         self._mailbox = UpdateMailbox()
         self._break_commands = Queue(maxsize=8)
         self.result: SessionResult | None = None
         self.statuses = {name: ("CHECKING", "Initializing") for name in (
-            "Camera", "AI Detection", "Face Tracking", "Security Monitor",
+            "Camera", "AI Detection", "Face Tracking", "Security Monitor", "Evidence", "Session",
         )}
 
     def _make_security(self):
@@ -181,6 +187,15 @@ class VisionWorker(QThread):
             self.statuses[name] = value
             self.components_changed.emit(dict(self.statuses))
 
+    def _face_unavailable(self, detail):
+        """Expose technical failures once; never turn them into absence."""
+        detail = str(detail or "Tracker did not initialize or return a valid result")
+        if self.statuses.get("Face Tracking") != ("UNAVAILABLE", detail):
+            self._status("Face Tracking", "UNAVAILABLE", detail)
+            message = f"Face tracking unavailable: {detail}; absence monitoring paused"
+            print(f"[FACE TRACKING] {message}", file=sys.stderr)
+            self.notice.emit(message)
+
     def _cleanup(self, resource, method):
         try:
             getattr(resource, method)()
@@ -200,11 +215,16 @@ class VisionWorker(QThread):
 
     def run(self):
         capture = tracker = security = None
-        events = EventEngine(self.config.events, clock=self._clock)
+        events = EventEngine(self.config.events, clock=self._clock, wall_clock=self._wall_clock)
         risk = RiskEngine(self.config.risk)
-        breaks = BreakManager(self.config.breaks)
+        breaks = BreakManager(self.config.breaks, wall_clock=self._wall_clock)
         recent_frame = RecentUsableFrame(self.config.camera_quality)
         started_at = None
+        started_wall = None
+        session_directory = None
+        persistence_error = None
+        store = evidence = None
+        evidence_available = True
         error = None
         try:
             if self._stopping():
@@ -231,11 +251,12 @@ class VisionWorker(QThread):
                 return
             try:
                 tracker = self._face_factory(self.config.face_model)
-                self._status("Face Tracking", "READY" if tracker.available else "UNAVAILABLE",
-                             "MediaPipe initialized" if tracker.available else str(tracker.error))
+                if tracker.available:
+                    self._status("Face Tracking", "READY", "MediaPipe initialized")
+                else:
+                    self._face_unavailable(tracker.error)
             except Exception as exc:
-                self._status("Face Tracking", "UNAVAILABLE", str(exc))
-                self.notice.emit(f"Face tracking unavailable: {exc}")
+                self._face_unavailable(exc)
             if self._stopping():
                 return
             try:
@@ -248,10 +269,41 @@ class VisionWorker(QThread):
                 if security is not None:
                     self._cleanup(security, "stop")
                     security = None
-            evidence = self._evidence_factory(self.config.evidence)
+            started_wall = self._wall_clock()
+            evidence_config = self.config.evidence
+            if self.config.storage.enabled:
+                try:
+                    store = self._store_factory(self.config.storage)
+                    session_directory = store.create_session(self.config.student, started_wall)
+                    evidence_config = replace(evidence_config, directory=session_directory / "evidence")
+                    self._status("Session", "READY", f"Local session folder: {session_directory}")
+                except Exception as exc:
+                    persistence_error = f"Cannot create session folder: {exc}"
+                    evidence_available = False
+                    self._status("Session", "ERROR", persistence_error)
+                    self.notice.emit(persistence_error + "; monitoring continues in memory")
+            else:
+                self._status("Session", "UNAVAILABLE", "Persistence disabled; session history remains in memory")
+            try:
+                evidence = self._evidence_factory(evidence_config)
+                self._status("Evidence", "READY" if evidence_available else "UNAVAILABLE",
+                             f"Event snapshots: {evidence_config.directory}" if evidence_available
+                             else "No usable session folder; events retained without snapshots")
+            except Exception as exc:
+                evidence_available = False
+                self._status("Evidence", "UNAVAILABLE", str(exc))
+                self.notice.emit(f"Evidence unavailable: {exc}; events retained")
             if self._stopping():
                 return
             started_at = self._clock()
+            self._status("Camera", "ACTIVE", f"Camera {self.config.camera_index} streaming")
+            self._status("AI Detection", "ACTIVE", "Local YOLO11n inference on CPU")
+            if tracker is not None and tracker.available:
+                self._status("Face Tracking", "ACTIVE", "MediaPipe face/head tracking active")
+            if evidence_available:
+                self._status("Evidence", "ACTIVE", f"Event snapshots: {evidence_config.directory}")
+            if self.config.storage.enabled and persistence_error is None:
+                self._status("Session", "ACTIVE", f"Current session: {session_directory.name}")
             self.session_started.emit(started_at)
             durations = deque(maxlen=30)
             frame_count = 0
@@ -278,20 +330,25 @@ class VisionWorker(QThread):
                     try:
                         face = tracker.process(frame)
                     except Exception as exc:
-                        self._status("Face Tracking", "UNAVAILABLE", str(exc))
+                        self._face_unavailable(exc)
                         self._cleanup(tracker, "close")
                         tracker = None
                 if face.status == FaceStatus.UNAVAILABLE:
-                    detail = str(tracker.error) if tracker is not None and tracker.error else self.statuses["Face Tracking"][1]
-                    self._status("Face Tracking", "UNAVAILABLE", detail)
+                    detail = tracker.error if tracker is not None else None
+                    if not detail and self.statuses["Face Tracking"][0] == "UNAVAILABLE":
+                        detail = self.statuses["Face Tracking"][1]
+                    self._face_unavailable(detail)
                 now = self._clock()
                 new_events = self._update_break(breaks, events, now)
                 signals = replace(frame_signals(detections, face, frame.shape, events.config),
                                   camera_obstructed=quality.obstructed, camera_quality=quality.to_dict(),
                                   authorized_break=breaks.active)
                 new_events.extend(events.update(signals, now=now))
-                missing_warning = events.condition_qualified(EventType.FACE_MISSING)
                 obstruction_warning = events.condition_qualified(EventType.CAMERA_OBSTRUCTED)
+                # This is live episode state, independent of new_events and the
+                # temporary banner. Confirmed covers, breaks and tracker errors
+                # reset absence in the Event Engine before this is published.
+                missing_warning = events.condition_qualified(EventType.FACE_MISSING)
                 if security is not None:
                     try:
                         new_events.extend(events.record_security_events(security.poll()))
@@ -315,9 +372,15 @@ class VisionWorker(QThread):
                     if event.type == EventType.CAMERA_OBSTRUCTED:
                         snapshot, source = recent_frame.evidence_frame(evidence_frame, now)
                         event = replace(event, metadata={**(event.metadata or {}), **source})
-                    event = evidence.capture(event, snapshot)
-                    if evidence.should_capture(event) and event.evidence_path is None:
+                    eligible = (evidence or EvidenceManager(evidence_config)).should_capture(event)
+                    if evidence_available and evidence is not None:
+                        event = evidence.capture(event, snapshot)
+                    if eligible and event.evidence_path is None:
+                        self._status("Evidence", "ERROR" if evidence_available else "UNAVAILABLE",
+                                     f"Snapshot unavailable for {event.type.value}; event retained")
                         self.notice.emit(f"Evidence save failed for {event.type.value}; event retained")
+                    elif eligible:
+                        self._status("Evidence", "ACTIVE", "Latest snapshot saved successfully")
                     enriched.append(event)
                 if enriched:
                     events.history[-len(enriched):] = enriched
@@ -340,6 +403,8 @@ class VisionWorker(QThread):
             error = str(exc)
             self.failed.emit(error)
         finally:
+            ended_wall = self._wall_clock() if started_at is not None else None
+            duration = 0.0 if started_at is None else max(0.0, self._clock() - started_at)
             self._stop_requested.set()
             # Drop any queued PIN values as soon as the session stops.
             while not self._break_commands.empty():
@@ -359,7 +424,20 @@ class VisionWorker(QThread):
                         error = error or detail
             self.result = SessionResult(
                 self.config.student, self.config.exam,
-                0.0 if started_at is None else max(0.0, self._clock() - started_at),
+                duration,
                 risk.current_score, risk.current_level.value, tuple(events.history),
                 dict(risk.event_counts), error,
+                started_at=started_wall if started_at is not None else None, ended_at=ended_wall,
+                session_directory=session_directory, persistence_error=persistence_error,
             )
+            # Synchronous local writes stay on this worker and finish before its
+            # finished signal. The controller joins before showing the report.
+            if started_at is not None and session_directory is not None and store is not None:
+                try:
+                    store.save_session(self.result)
+                    self._status("Session", "READY", f"Completed session saved: {session_directory}")
+                except Exception as exc:
+                    persistence_error = f"Session save failed: {exc}"
+                    self.result = replace(self.result, persistence_error=persistence_error)
+                    self._status("Session", "ERROR", persistence_error)
+                    self.notice.emit(persistence_error + "; in-memory report and evidence retained")

@@ -1,6 +1,7 @@
 """Session data exchanged between the monitoring thread and desktop pages."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 from time import perf_counter
@@ -9,10 +10,16 @@ from evidence import EvidenceConfig
 from monitoring import EventEngineConfig, ProctoringEvent, RiskConfig
 from monitoring.break_manager import BreakConfig
 from security import SecurityConfig
+from session_storage import SessionStorageConfig
 from vision.face_tracker import DEFAULT_MODEL_PATH, FaceResult
 from vision.camera_quality import CameraQualityConfig
 
 ROOT = Path(__file__).resolve().parents[2]
+DISPLAY_TIMEZONE = timezone(timedelta(hours=5), "Asia/Qyzylorda")
+
+
+def session_wall_time():
+    return datetime.now(DISPLAY_TIMEZONE)
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,7 @@ class SessionConfig:
     security: SecurityConfig = field(default_factory=SecurityConfig)
     camera_quality: CameraQualityConfig = field(default_factory=CameraQualityConfig)
     breaks: BreakConfig = field(default_factory=BreakConfig)
+    storage: SessionStorageConfig = field(default_factory=SessionStorageConfig)
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,10 @@ class SessionResult:
     events: tuple[ProctoringEvent, ...]
     event_counts: dict
     error: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    session_directory: Path | None = None
+    persistence_error: str | None = None
 
 
 class SessionTimer:

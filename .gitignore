@@ -8,3 +8,7 @@ __pycache__/
 models/*.pt
 models/*.task
 /sessions/
+logs/
+*.log
+.idea/
+.vscode/

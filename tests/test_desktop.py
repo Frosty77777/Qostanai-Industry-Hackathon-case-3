@@ -24,6 +24,7 @@ from shiboken6 import isValid
 from evidence import EvidenceConfig, EvidenceManager
 from monitoring import EventType, PhoneDetectionConfig, ProctoringEvent, Severity
 from security import SecurityConfig, WindowsSecurityBackend
+from session_storage import SessionStorageConfig
 from ui.exam_page import TIMELINE_LIMIT
 from ui.main_window import MainWindow
 from ui.session import FrameUpdate, SessionConfig, SessionResult, SessionTimer, format_duration
@@ -239,11 +240,11 @@ class DesktopChecks(unittest.TestCase):
         self.assertEqual(self.window.report_page.values["Total Events"].text(), "1")
         self.assertEqual(self.window.result.events, (event(),))
 
-    def test_report_placeholder_disables_unimplemented_view_report(self):
+    def test_completed_session_opens_full_report(self):
         worker = self.start()
         self.window.finish_session()
         worker.complete()
-        self.assertFalse(self.window.report_page.view_button.isEnabled())
+        self.assertTrue(self.window.report_page.view_button.isEnabled())
         self.assertEqual(self.window.report_page.values["Duration"].text(), "00:01:05")
 
     def test_new_session_resets_state_and_can_start_again(self):
@@ -363,6 +364,7 @@ class SessionDataChecks(unittest.TestCase):
 
 class ThreadedDesktopChecks(unittest.TestCase):
     def run_lifecycle(self, closing):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
         capture = FakeCapture()
         tracker, security = FakeFace(), FakeSecurity()
         gate = Event()
@@ -371,6 +373,7 @@ class ThreadedDesktopChecks(unittest.TestCase):
         holder = []
 
         def factory(config, parent):
+            config = replace(config, storage=SessionStorageConfig(directory=Path(directory)))
             worker = VisionWorker(config, parent,
                 camera_opener=lambda cv2, index: (capture, np.zeros((48, 64, 3), dtype=np.uint8)),
                 detector_factory=lambda *args: detector,
@@ -489,7 +492,8 @@ class VisionWorkerChecks(unittest.TestCase):
         self.detections = []
         self.detector.detect.side_effect = self.detect
         self.encoder = Mock(return_value=b"fake jpeg")
-        self.config = replace(SessionConfig(), evidence=EvidenceConfig(directory=Path(self.directory.name)))
+        self.config = replace(SessionConfig(), evidence=EvidenceConfig(directory=Path(self.directory.name)),
+                              storage=SessionStorageConfig(directory=Path(self.directory.name) / "sessions"))
         self.worker = VisionWorker(
             self.config, clock=lambda: self.now,
             camera_opener=lambda cv2, index: (self.capture, usable_frame()),

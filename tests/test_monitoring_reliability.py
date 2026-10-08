@@ -20,6 +20,7 @@ from test_face_tracker import face_transform
 from evidence import EvidenceConfig, EvidenceManager
 from monitoring import EventEngine, EventEngineConfig, EventRule, EventType, FrameSignals, RiskEngine, Severity
 from monitoring.break_manager import BreakConfig, BreakManager
+from session_storage import SessionStorageConfig
 from ui.exam_page import ExamPage
 from ui.main_window import MainWindow
 from ui.session import SessionConfig
@@ -224,7 +225,8 @@ class ReliabilityWorkerChecks(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         config = config or SessionConfig(breaks=BreakConfig(teacher_pin=PIN))
-        config = replace(config, evidence=EvidenceConfig(directory=Path(directory.name)))
+        config = replace(config, evidence=EvidenceConfig(directory=Path(directory.name)),
+                         storage=SessionStorageConfig(directory=Path(directory.name) / "sessions"))
         frames = frames or [usable_frame() for _ in times]
         faces = faces or [PRESENT for _ in times]
         state = {"index": -1, "now": times[0]}
